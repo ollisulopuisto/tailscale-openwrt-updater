@@ -155,6 +155,75 @@ Polut `STATE_DIR`, `BACKUP_DIR`, `SBIN_DIR`, `INIT_SCRIPT`, `TMP_DIR`,
 JSON luetaan `jsonfilter`illä (libubox, OpenWrt:ssä vakiona). Jos sitä ei
 ole, käytetään sed-varapolkua.
 
+## Pienen flashin laitteet (16 MB)
+
+Ylävirran binäärit ovat purettuna isot: `tailscaled` ~29 MB ja erillinen
+`tailscale` ~14 MB, eli noin **45 MB** asennuskohteeseen. Feedin paketti
+mahtuu, koska se on imagessa squashfs-pakattuna (~10 MB) ja koska siinä
+CLI on käännetty daemoniin mukaan — `/usr/sbin/tailscale` on symlinkki
+`tailscaled`iin.
+
+Esimerkki laitteesta, jolla tämä ei onnistu (ramips/mt7621, 16 MB flash):
+
+    /overlay   16.0M  vapaana 14.7M      tarve ~45M
+
+`ts-update check` kertoo tilanteen suoraan, ja `ts-update run` keskeytyy
+ennen kuin mitään on ladattu. Vaihtoehdot:
+
+1. **Pysy feedin versiossa** ja päivitä tailscale flashaamalla uusi image,
+   jossa on uudempi paketti mukana. Tämä on pienen flashin laitteen
+   natiivi tie.
+2. **Aja binäärit USB-levyltä** ja jätä `/usr/sbin`:iin pelkät symlinkit.
+   Symlinkki maksaa overlayssa tavuja, ei megatavuja.
+
+### Binäärit USB-levylle
+
+Ensimmäinen siirtymä tehdään käsin, koska ts-update ei muuta asettelua
+itse. Sen jälkeen ts-update hoitaa päivitykset normaalisti.
+
+    V=1.102.2                       # ts-update check kertoo uusimman
+    A=mipsle                        # ts-update check kertoo arkkitehtuurin
+    mkdir -p /mnt/usb/tailscale /mnt/usb/tmp
+    cd /mnt/usb/tmp
+    wget "https://pkgs.tailscale.com/stable/tailscale_${V}_${A}.tgz"
+    wget "https://pkgs.tailscale.com/stable/tailscale_${V}_${A}.tgz.sha256"
+    echo "$(cat tailscale_${V}_${A}.tgz.sha256)  tailscale_${V}_${A}.tgz" | sha256sum -c
+    tar xzf "tailscale_${V}_${A}.tgz"
+    cp tailscale_${V}_${A}/tailscale tailscale_${V}_${A}/tailscaled /mnt/usb/tailscale/
+    chmod 755 /mnt/usb/tailscale/tailscale*
+
+    /mnt/usb/tailscale/tailscale version    # testaa ENNEN kuin vaihdat mitään
+
+    /etc/init.d/tailscale stop
+    rm -f /usr/sbin/tailscale /usr/sbin/tailscaled
+    ln -s /mnt/usb/tailscale/tailscaled /usr/sbin/tailscaled
+    ln -s /mnt/usb/tailscale/tailscale  /usr/sbin/tailscale
+    /etc/init.d/tailscale start
+    tailscale status
+
+Sen jälkeen `/etc/default/ts-update`:
+
+    SBIN_DIR=/mnt/usb/tailscale
+    BACKUP_DIR=/mnt/usb/ts-backup
+    TMP_DIR=/mnt/usb/tmp
+    # Tila pysyy flashissa, jotta boottitarkistus toimii vaikka USB olisi irti
+    STATE_DIR=/root/ts-update
+
+Paluu feedin versioon: `/usr/sbin` on overlayfs, joten alkuperäiset
+tiedostot ovat yhä `/rom`issa symlinkkien alla. Poistamalla overlayn
+merkinnät ne tulevat takaisin:
+
+    /etc/init.d/tailscale stop
+    rm -f /overlay/upper/usr/sbin/tailscale /overlay/upper/usr/sbin/tailscaled
+    reboot
+
+Kaksi varoitusta. **Daemon-binääri on tällöin irrotettavan levyn varassa:**
+jos mountti katoaa, tailscale kaatuu. Tee tämä vain laitteella, johon
+pääsee muutakin kautta kuin tailnetin yli. Ja **`apk upgrade` voi palauttaa
+feedin omat tiedostot** `/usr/sbin`:iin, jolloin symlinkit katoavat ja
+laite palaa vanhaan versioon — tarkista `ls -l /usr/sbin/tailscale*`
+paketti päivitysten jälkeen.
+
 ## Mitä tämä EI suojaa
 
 - **Reitittimen kaatuminen tai jumittuminen.** Vahti elää samassa
@@ -162,6 +231,9 @@ ole, käytetään sed-varapolkua.
   boottausta — ja jos laite ei boottaa, ei senkään jälkeen.
 - **LAN-yhteyden tai virran menetys.** Boottitarkistus auttaa vain, jos
   laite nousee ylös.
+- **Liian pieni flash.** 16 MB:n laitteella ylävirran binäärit eivät mahdu
+  `/usr/sbin`:iin lainkaan; ks. edellä. `check` ja `run` kertovat tämän,
+  mutta eivät voi kiertää sitä.
 - **apk-paketin päivitys.** `apk upgrade` asentaa feedin binäärit takaisin
   `/usr/sbin`:iin (ja `tailscale`n taas symlinkkinä). Aja `ts-update run`
   uudelleen paketin päivityksen jälkeen.
@@ -216,6 +288,8 @@ ajetaan kahdesti, jos `python3` löytyy: kerran sed-varapolulla ja kerran
 | Vahvistus samaan aikaan kun vahti palauttaa | `confirm` kertoo todellisen tilan | 16 |
 | Vanhentunut `watchdog.pid` boottauksen jälkeen | ei tapa vierasta prosessia | 17 |
 | `netinstall.sh` GitHubista | asentaa, ei ylikirjoita asetuksia, torjuu katkenneen latauksen | 18 |
+| Feedin symlink-asettelu | varmuuskopio linkkinä, rollback palauttaa symlinkin | 19 |
+| Asennuskohde täynnä | keskeytys ennen latausta | 20 |
 
 Testaamatta oikealla laitteella: `mipsle`, `mips`, `mips64`, `arm`,
 `amd64`, `386`, `riscv64`. Ajossa: aarch64 / OpenWrt 25.12.5.
