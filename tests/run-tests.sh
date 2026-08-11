@@ -514,8 +514,67 @@ case18() {
 	assert_file "asetukset jäivät" "$SB/fakeroot/etc/default/ts-update"
 }
 
+case19() {
+	CASE="19 feedin symlink-asettelu"; setup; say "$CASE"
+	# feedin paketti asentaa tailscalen symlinkkinä tailscalediin
+	rm -f "$SB/sbin/tailscale"
+	ln -s tailscaled "$SB/sbin/tailscale"
+
+	TS_TIMEOUT=120 ts run >/dev/null 2>&1
+	assert "uusi versio asennettu" "$(installed_version)" "$NEW"
+	assert_file "symlinkki tallennettiin linkkinä" "$SB/backup/tailscale.link"
+	assert_nofile "samaa binääriä ei pakattu kahdesti" "$SB/backup/tailscale.gz"
+	assert "linkin kohde talteen" "$(cat "$SB/backup/tailscale.link")" "tailscaled"
+	if [ -L "$SB/sbin/tailscale" ]; then
+		bad "päivityksen jälkeen pitäisi olla oikea binääri"
+	else
+		ok "päivitys korvasi symlinkin binäärillä"
+	fi
+
+	ts rollback >/dev/null 2>&1
+	if [ -L "$SB/sbin/tailscale" ]; then
+		ok "rollback palautti symlinkin"
+	else
+		bad "rollback jätti oikean tiedoston symlinkin tilalle"
+	fi
+	assert "linkki osoittaa oikeaan" "$(readlink "$SB/sbin/tailscale")" "tailscaled"
+	assert "vanha versio takaisin" "$(installed_version)" "$OLD"
+}
+
+case20() {
+	CASE="20 asennuskohteessa ei ole tilaa"; setup; say "$CASE"
+	# df-tynkä: asennuskohde näyttää täydeltä, muut polut oikealta df:ltä
+	cat > "$SB/bin/df" <<EOF
+#!/bin/sh
+[ "\$1" = --stub-check ] && { echo stub; exit 0; }
+for a in "\$@"; do
+	case "\$a" in
+		"$SB/sbin"*)
+			printf 'Filesystem 1K-blocks Used Available Use%%%% Mounted on\ntmpfs 16384 16384 0 100%%%% %s\n' "\$a"
+			exit 0 ;;
+	esac
+done
+exec /bin/df "\$@"
+EOF
+	chmod 755 "$SB/bin/df"
+
+	if [ "$(env -i PATH="$SB/bin:/usr/bin:/bin" "$TS_SH" -c 'df --stub-check' 2>/dev/null)" != stub ]; then
+		say "  ohitettu (kuori ajaa oman df-appletinsa PATHin ohi)"
+		return 0
+	fi
+
+	out="$(ts run 2>&1)"; rc=$?
+	assert "poistuu virheellä" "$rc" 1
+	case "$out" in *"ei ole tilaa uusille binääreille"*) ok "kertoo syyn" ;;
+		*) bad "väärä viesti: $out" ;; esac
+	assert_nofile "mitään ei ladattu" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
+	assert_nofile "ei varmuuskopiota" "$SB/backup/tailscaled.gz"
+	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
+	assert_file "daemon jätettiin rauhaan" "$SB/daemon.pid"
+}
+
 run_suite() {
-	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
+	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 		want "$n" || continue
 		"case$n"
 	done
