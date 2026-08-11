@@ -21,6 +21,41 @@ Vain binäärit `/usr/sbin`:ssä vaihdetaan.
 
 ## Asennus
 
+### Suoraan GitHubista laitteella
+
+Laitteella itsellään, ilman että työasemalta tarvitsee kopioida mitään.
+`wget` (OpenWrt:llä uclient-fetch) ja `curl` käyvät kumpikin — skripti
+tunnistaa itse, kumpi laitteelta löytyy:
+
+    URL=https://raw.githubusercontent.com/ollisulopuisto/tailscale-openwrt-updater/main/netinstall.sh
+    wget -O /tmp/netinstall.sh "$URL"     # tai: curl -fsSL -o /tmp/netinstall.sh "$URL"
+    sh /tmp/netinstall.sh
+
+Tai yhdellä rivillä, jos et halua lukea skriptiä ensin:
+
+    wget -qO- "$URL" | sh
+    curl -fsSL "$URL" | sh
+
+`netinstall.sh` hakee `ts-updaten`, boottitarkistuksen ja asetusmallin,
+tarkistaa ettei lataus katkennut, asentaa ne ja ottaa boottitarkistuksen
+käyttöön. Olemassa olevaa `/etc/default/ts-update`-tiedostoa ei
+ylikirjoiteta, joten uudelleenasennus ei hukkaa laitekohtaisia asetuksia.
+Jos päivitys odottaa vahvistusta, asennus keskeytyy — silloin kesken on
+vahvistusikkuna, jota ei kannata sotkea.
+
+Version voi kiinnittää ja tarkistussumman vaatia:
+
+    sh /tmp/netinstall.sh --ref v1.0 --sha256 <summa>
+
+Poisto (asetukset, tila ja varmuuskopiot jäävät):
+
+    sh /tmp/netinstall.sh --uninstall
+
+Jos HTTPS ei toimi, laitteesta puuttuu yleensä `ca-bundle` tai
+`libustream-mbedtls` (`apk add ca-bundle`).
+
+### Työasemalta ssh:n yli
+
 Yksi laite:
 
     scp -O ts-update root@reititin:/usr/sbin/ts-update
@@ -136,7 +171,7 @@ ole, käytetään sed-varapolkua.
 
 ## Kehitys
 
-    shellcheck -s sh ts-update install.sh ts-update-bootcheck.init tests/run-tests.sh
+    shellcheck -s sh ts-update install.sh netinstall.sh ts-update-bootcheck.init tests/run-tests.sh
     ./tests/run-tests.sh
 
 GitHub Actions (`.github/workflows/ci.yml`) ajaa jokaisesta pushista ja
@@ -173,6 +208,7 @@ ajetaan kahdesti, jos `python3` löytyy: kerran sed-varapolulla ja kerran
 | Boottaus binäärinvaihdon ja vahdin virityksen välissä | rollback, ei jää voimaan | 15 |
 | Vahvistus samaan aikaan kun vahti palauttaa | `confirm` kertoo todellisen tilan | 16 |
 | Vanhentunut `watchdog.pid` boottauksen jälkeen | ei tapa vierasta prosessia | 17 |
+| `netinstall.sh` GitHubista | asentaa, ei ylikirjoita asetuksia, torjuu katkenneen latauksen | 18 |
 
 Testaamatta oikealla laitteella: `mipsle`, `mips`, `mips64`, `arm`,
 `amd64`, `386`, `riscv64`. Ajossa: aarch64 / OpenWrt 25.12.5.

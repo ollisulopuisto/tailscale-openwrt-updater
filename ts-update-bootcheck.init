@@ -23,3 +23,5 @@ start() {
 stop() {
 	return 0
 }
+
+# ts-update-eof

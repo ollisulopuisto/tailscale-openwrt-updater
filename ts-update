@@ -836,3 +836,7 @@ case "${1:-}" in
 		exit 1
 		;;
 esac
+
+# Loppumerkki: netinstall.sh tarkistaa tämän varmistuakseen, ettei lataus
+# katkennut kesken tiedoston. Pidä tämä viimeisenä rivinä.
+# ts-update-eof
