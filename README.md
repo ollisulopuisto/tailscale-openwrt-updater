@@ -80,6 +80,7 @@ Ympäristömuuttujina tai tiedostossa `/etc/default/ts-update`
 | `IFACE` | `tailscale0` | verkkoliitäntä, jonka olemassaolo tarkistetaan |
 | `CHECK_ROUTES` | 1 | varmista mainostettujen reittien säilyminen |
 | `HEALTH_WAIT` | 90 | sekunteja daemonin nousemisen odotusta |
+| `WGET` | `wget` | latauskomento (odottaa `-q`/`-T`/`-O`-valitsimia) |
 
 Polut `STATE_DIR`, `BACKUP_DIR`, `SBIN_DIR`, `INIT_SCRIPT`, `TMP_DIR`,
 `LOCK_FILE` ja `BASE_URL` voi myös ohittaa; testipeti käyttää tätä.
@@ -135,8 +136,14 @@ ole, käytetään sed-varapolkua.
 
 ## Kehitys
 
-    shellcheck -s sh ts-update install.sh ts-update-bootcheck.init
+    shellcheck -s sh ts-update install.sh ts-update-bootcheck.init tests/run-tests.sh
     ./tests/run-tests.sh
+
+GitHub Actions (`.github/workflows/ci.yml`) ajaa jokaisesta pushista ja
+pull requestista `shellcheck -s sh`in, `dash -n`-syntaksitarkistuksen ja
+testimatriisin kahdella kuorella: `dash` (tiukka POSIX) ja busybox ash
+(sama kuin OpenWrt:llä). Kuoren voi valita paikallisestikin:
+`TS_SH=dash ./tests/run-tests.sh`.
 
 Testipeti ajaa koko koneiston hiekkalaatikossa: `tailscale`, init-skripti
 ja `wget` ovat tynkiä, "binäärit" ovat sh-skriptejä ja polut osoittavat

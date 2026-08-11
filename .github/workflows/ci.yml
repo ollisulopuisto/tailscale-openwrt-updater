@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # shellcheck kaatuu skandeihin, jos locale on pelkkä C
+  LC_ALL: C.UTF-8
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck -s sh
+        run: |
+          shellcheck --version
+          shellcheck -s sh ts-update install.sh ts-update-bootcheck.init tests/run-tests.sh
+
+      - name: syntaksitarkistus (dash)
+        run: |
+          for f in ts-update install.sh ts-update-bootcheck.init tests/run-tests.sh; do
+            dash -n "$f" || exit 1
+          done
+
+  tests:
+    name: testit (${{ matrix.shell }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # dash = tiukka POSIX, busybox ash = sama kuin OpenWrt:llä
+        shell: [dash, busybox]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: asenna busybox
+        if: matrix.shell == 'busybox'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends busybox-static
+          printf '#!/bin/sh\nexec busybox sh "$@"\n' | sudo tee /usr/local/bin/bbsh >/dev/null
+          sudo chmod 755 /usr/local/bin/bbsh
+          busybox sh -c 'echo busybox ash ok'
+
+      - name: aja testimatriisi
+        timeout-minutes: 15
+        run: |
+          if [ "${{ matrix.shell }}" = busybox ]; then
+            TS_SH=/usr/local/bin/bbsh ./tests/run-tests.sh
+          else
+            TS_SH=dash ./tests/run-tests.sh
+          fi

@@ -16,6 +16,7 @@
 #   IFACE=tailscale0  verkkoliitäntä, jonka olemassaolo tarkistetaan
 #   CHECK_ROUTES=1    varmista että mainostetut reitit säilyvät päivityksessä
 #   HEALTH_WAIT=90    sekuntia, joita odotetaan daemonin nousemista
+#   WGET=wget         latauskomento (odottaa wgetin -q/-T/-O-valitsimia)
 
 set -u
 
@@ -39,6 +40,7 @@ Asetukset ympäristömuuttujina tai tiedostossa /etc/default/ts-update
   IFACE=tailscale0  verkkoliitäntä, jonka olemassaolo tarkistetaan
   CHECK_ROUTES=1    varmista että mainostetut reitit säilyvät päivityksessä
   HEALTH_WAIT=90    sekuntia, joita odotetaan daemonin nousemista
+  WGET=wget         latauskomento (odottaa wgetin -q/-T/-O-valitsimia)
 EOF
 }
 
@@ -75,6 +77,9 @@ INIT_SCRIPT="${INIT_SCRIPT:-/etc/init.d/tailscale}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/ts-update.lock}"
 TMP_DIR="${TMP_DIR:-/tmp}"
 BASE_URL="${BASE_URL:-https://pkgs.tailscale.com/stable}"
+# Latauskomento. OpenWrt:llä wget on uclient-fetch; jos laitteella on
+# vain jokin muu hakija, sen voi antaa tässä (odottaa wgetin -q/-T/-O).
+WGET="${WGET:-wget}"
 
 DEADLINE_FILE="$STATE_DIR/deadline"
 PENDING_FILE="$STATE_DIR/pending"
@@ -234,7 +239,7 @@ need_space() {  # need_space <polku> <KiB> <selite>
 # ei mitään.
 fetch_stable_json() {
 	[ -s "$JSON_CACHE" ] && return 0
-	if ! wget -q -T 30 -O "$JSON_CACHE" "$BASE_URL/?mode=json" 2>/dev/null; then
+	if ! "$WGET" -q -T 30 -O "$JSON_CACHE" "$BASE_URL/?mode=json" 2>/dev/null; then
 		rm -f "$JSON_CACHE"
 		return 1
 	fi
@@ -583,9 +588,9 @@ cmd_run() {
 
 	need_space "$TMP_DIR" "$NEED_TMP_KIB" "lataus ja purku" || exit 1
 
-	wget -q -T 60 "$BASE_URL/tailscale_${new}_${ARCH}.tgz" -O "$tgz" || {
+	"$WGET" -q -T 60 "$BASE_URL/tailscale_${new}_${ARCH}.tgz" -O "$tgz" || {
 		log "VIRHE: lataus epäonnistui"; rm -f "$tgz"; exit 1; }
-	wget -q -T 60 "$BASE_URL/tailscale_${new}_${ARCH}.tgz.sha256" -O "$sha" || {
+	"$WGET" -q -T 60 "$BASE_URL/tailscale_${new}_${ARCH}.tgz.sha256" -O "$sha" || {
 		log "VIRHE: tarkistussummaa ei saatu"; rm -f "$tgz" "$sha"; exit 1; }
 
 	sum="$(awk '{print $1; exit}' "$sha")"

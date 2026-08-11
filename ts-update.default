@@ -24,3 +24,6 @@ CHECK_ROUTES=1
 # Sekunteja, joita odotetaan daemonin nousemista ennen kuin päivitys
 # tulkitaan epäonnistuneeksi.
 HEALTH_WAIT=90
+
+# Latauskomento, jos laitteella ei ole wgetiä tavallisessa paikassa.
+#WGET=uclient-fetch

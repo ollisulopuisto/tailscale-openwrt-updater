@@ -10,7 +10,8 @@
 #   ./tests/run-tests.sh 5 6      aja vain testit 5 ja 6
 #
 # Suite ajetaan kahdesti, jos python3 löytyy: kerran ilman jsonfilteriä
-# (sed-varapolku) ja kerran jsonfilter-tyngän kanssa.
+# (sed-varapolku) ja kerran jsonfilter-tyngän kanssa. TS_SH valitsee
+# kuoren, jolla ts-update ajetaan (oletus sh).
 
 # shellcheck disable=SC2317  # apurit ja testitapaukset kutsutaan epäsuorasti
 set -u
@@ -18,6 +19,9 @@ set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$SRC/ts-update"
 WANT="$*"
+# Kuori, jolla ts-update ajetaan. OpenWrt:llä se on busybox ash, joten
+# CI ajaa suiten sekä dashilla että busyboxilla.
+TS_SH="${TS_SH:-sh}"
 ROOT="${TMPDIR:-/tmp}/ts-update-tests.$$"
 PASS=0
 FAIL=0
@@ -125,7 +129,9 @@ exit 0
 EOF
 	chmod 755 "$SB/bin/init-tailscale"
 
-	# wget-tynkä: tarjoilee $SB/www:sta, kaatuu jos $SB/netdown on olemassa
+	# wget-tynkä: tarjoilee $SB/www:sta, kaatuu jos $SB/netdown on olemassa.
+	# Annetaan ts-updatelle WGET-muuttujana, koska busybox sh voi olla
+	# käännetty standalone-tilaan, jolloin PATH-tynkä ei näkyisi.
 	cat > "$SB/bin/wget" <<EOF
 #!/bin/sh
 out=""; url=""
@@ -169,12 +175,13 @@ ts() {
 		LOCK_FILE="$SB/lock" \
 		TMP_DIR="$SB/tmp" \
 		BASE_URL="http://tynkä/stable" \
+		WGET="$SB/bin/wget" \
 		ARCH="$ARCH" \
 		TIMEOUT="${TS_TIMEOUT:-300}" \
 		HEALTH_WAIT="${TS_HEALTH_WAIT:-6}" \
 		PEER="${TS_PEER:-}" \
 		CHECK_ROUTES="${TS_CHECK_ROUTES:-1}" \
-		sh "$SCRIPT" "$@"
+		"$TS_SH" "$SCRIPT" "$@"
 }
 
 installed_version() { "$SB/sbin/tailscale" version | head -n1; }
