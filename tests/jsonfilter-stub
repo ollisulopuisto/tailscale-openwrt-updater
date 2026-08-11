@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Riisuttu jsonfilter testejä varten.
+
+Toteuttaa vain sen, mitä ts-update käyttää: -i FILE / stdin, -e '@.Avain'
+ja -e '@.Avain[*]'. Oikea jsonfilter (libubox) osaa paljon enemmän, mutta
+tämä riittää varmistamaan, että skripti toimii myös jsonfilter-polulla.
+"""
+import json
+import re
+import sys
+
+
+def main() -> int:
+    infile = None
+    expr = None
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "-i":
+            infile = args[i + 1]
+            i += 2
+        elif args[i] == "-e":
+            expr = args[i + 1]
+            i += 2
+        elif args[i] == "-s":
+            infile = None
+            i += 2
+        else:
+            i += 1
+
+    if expr is None:
+        return 1
+
+    raw = open(infile, encoding="utf-8").read() if infile else sys.stdin.read()
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return 1
+
+    m = re.fullmatch(r"@\.([A-Za-z0-9_]+)(\[\*\])?", expr)
+    if not m:
+        return 1
+    key, wildcard = m.group(1), m.group(2)
+
+    if not isinstance(doc, dict) or key not in doc:
+        return 0
+    value = doc[key]
+
+    if wildcard:
+        items = value.values() if isinstance(value, dict) else value
+        if not isinstance(items, (list, tuple)) and not hasattr(items, "__iter__"):
+            return 0
+        for item in items:
+            print(item if not isinstance(item, (dict, list)) else json.dumps(item))
+        return 0
+
+    if isinstance(value, (dict, list)):
+        print(json.dumps(value))
+    elif isinstance(value, bool):
+        print("true" if value else "false")
+    else:
+        print(value)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+# Asennetaan nimellä /etc/init.d/ts-update-bootcheck ja otetaan käyttöön:
+#   /etc/init.d/ts-update-bootcheck enable
+#
+# Vahvistusta odottava päivitys elää /root/ts-update-hakemistossa, mutta
+# vahtiprosessi ei selviä boottauksesta. Tämä käynnistää sen uudelleen
+# jäljellä olevaksi ajaksi — tai tekee rollbackin, jos määräaika ehti
+# umpeutua tai daemon ei nouse.
+
+# shellcheck disable=SC2034  # rc.common lukee nämä
+START=99
+# shellcheck disable=SC2034
+STOP=99
+
+start() {
+	[ -x /usr/sbin/ts-update ] || return 0
+	# Taustalle: terveystarkistus odottaa daemonia jopa puolitoista
+	# minuuttia, eikä boottia ole syytä jumittaa sen ajaksi. Jos mitään ei
+	# odota vahvistusta, boot-check poistuu heti itsestään.
+	/usr/sbin/ts-update boot-check >/dev/null 2>&1 &
+}
+
+stop() {
+	return 0
+}
