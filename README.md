@@ -33,8 +33,15 @@ tunnistaa itse, kumpi laitteelta löytyy:
 
 Tai yhdellä rivillä, jos et halua lukea skriptiä ensin:
 
-    wget -qO- "$URL" | sh
+    wget -O- "$URL" | sh
     curl -fsSL "$URL" | sh
+
+Putkiversiossa ei kannata käyttää `wget -q`:ta: jos lataus epäonnistuu,
+`sh` saa tyhjän syötteen ja koko asennus menee läpi hiljaa mitään
+tekemättä. Ilman `-q`:ta virhe näkyy. Skripti itse on kirjoitettu niin,
+että kesken katkennut lataus ei aja puolikasta asennusta (runko on
+`main()`-funktiossa, joka kutsutaan vasta viimeisellä rivillä), mutta
+tyhjää latausta ei voi mitenkään havaita skriptin sisältä.
 
 `netinstall.sh` hakee `ts-updaten`, boottitarkistuksen ja asetusmallin,
 tarkistaa ettei lataus katkennut, asentaa ne ja ottaa boottitarkistuksen
