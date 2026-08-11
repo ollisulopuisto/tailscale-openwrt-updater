@@ -1,0 +1,29 @@
+# Esimerkki: /etc/default/ts-update
+#
+# Laitekohtaiset asetukset. Ympäristömuuttujat voittavat tämän tiedoston,
+# joten yksittäisen ajon voi aina ohittaa: TIMEOUT=900 ts-update run
+
+# Binääriarkkitehtuuri. Tyhjänä tunnistetaan automaattisesti ja
+# tarkistetaan pkgs.tailscale.comin listaa vasten.
+#ARCH=arm64
+
+# Vahvistusaika sekunteina ennen automaattista rollbackia.
+TIMEOUT=300
+
+# Tailnet-osoite, johon pingataan terveystestissä. Kannattaa olla laite,
+# joka on aina päällä ja jonka kautta yhteys tähän reitittimeen kulkee.
+#PEER=100.74.52.79
+
+# Verkkoliitäntä, jonka olemassaolo tarkistetaan päivityksen jälkeen.
+#IFACE=tailscale0
+
+# 1 = varmista, että mainostetut reitit (subnet router / exit node)
+# ovat päivityksen jälkeen samat kuin ennen sitä.
+CHECK_ROUTES=1
+
+# Sekunteja, joita odotetaan daemonin nousemista ennen kuin päivitys
+# tulkitaan epäonnistuneeksi.
+HEALTH_WAIT=90
+
+# Latauskomento, jos laitteella ei ole wgetiä tavallisessa paikassa.
+#WGET=uclient-fetch
