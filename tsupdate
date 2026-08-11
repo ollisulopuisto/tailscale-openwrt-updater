@@ -1,0 +1,241 @@
+#!/bin/sh
+# ts-update — Tailscalen puoliautomaattinen päivitys OpenWrt:llä.
+#
+#   ts-update check      näytä nykyinen ja uusin versio
+#   ts-update run        päivitä, terveystarkistus, viritä vahdinvaihto
+#   ts-update confirm    vahvista onnistunut päivitys (peruu rollbackin)
+#   ts-update rollback   palauta edellinen versio heti
+#   ts-update status     näytä tila ja jäljellä oleva vahvistusaika
+#
+# Asetukset ympäristömuuttujina:
+#   ARCH=arm64        binääriarkkitehtuuri (mipsle, arm, amd64, ...)
+#   TIMEOUT=300       sekuntia vahvistusaikaa ennen automaattista rollbackia
+#   PEER=100.74.52.79 valinnainen tailnet-osoite, johon pingataan terveystestissä
+
+set -u
+
+ARCH="${ARCH:-arm64}"
+TIMEOUT="${TIMEOUT:-300}"
+PEER="${PEER:-}"
+
+BACKUP_DIR=/root/ts-backup
+CONFIRM_FLAG=/tmp/ts-update.confirm
+WATCHDOG_PID=/tmp/ts-update.watchdog.pid
+DEADLINE_FILE=/tmp/ts-update.deadline
+LOG=/tmp/ts-update.log
+
+log() {
+	echo "$(date '+%F %T') $*"
+	echo "$(date '+%F %T') $*" >> "$LOG"
+	logger -t ts-update "$*"
+}
+
+current_version() { tailscale version 2>/dev/null | head -n1; }
+
+latest_version() {
+	wget -qO- 'https://pkgs.tailscale.com/stable/?mode=json' 2>/dev/null \
+		| sed -n 's/.*"TarballsVersion": *"\([^"]*\)".*/\1/p'
+}
+
+# Odottaa että daemon on Running ja valinnainen peer vastaa. 0 = terve.
+health_check() {
+	i=0
+	while [ "$i" -lt 90 ]; do
+		if tailscale status --json 2>/dev/null | grep -q '"BackendState": *"Running"'; then
+			if [ -z "$PEER" ]; then
+				return 0
+			fi
+			if tailscale ping -c 1 --timeout 5s "$PEER" >/dev/null 2>&1; then
+				return 0
+			fi
+		fi
+		sleep 3
+		i=$((i + 3))
+	done
+	return 1
+}
+
+backup_binaries() {
+	mkdir -p "$BACKUP_DIR" || return 1
+	gzip -c /usr/sbin/tailscaled > "$BACKUP_DIR/tailscaled.gz" || return 1
+	gzip -c /usr/sbin/tailscale  > "$BACKUP_DIR/tailscale.gz"  || return 1
+	current_version > "$BACKUP_DIR/version"
+	return 0
+}
+
+install_from() {
+	dir="$1"
+	/etc/init.d/tailscale stop
+	sleep 1
+	cp "$dir/tailscaled" /usr/sbin/tailscaled.new || return 1
+	cp "$dir/tailscale"  /usr/sbin/tailscale.new  || return 1
+	mv /usr/sbin/tailscaled.new /usr/sbin/tailscaled
+	mv /usr/sbin/tailscale.new  /usr/sbin/tailscale
+	chmod 755 /usr/sbin/tailscaled /usr/sbin/tailscale
+	/etc/init.d/tailscale start
+	return 0
+}
+
+disarm() {
+	if [ -f "$WATCHDOG_PID" ]; then
+		kill "$(cat "$WATCHDOG_PID")" 2>/dev/null
+		rm -f "$WATCHDOG_PID"
+	fi
+	rm -f "$DEADLINE_FILE"
+}
+
+arm_watchdog() {
+	rm -f "$CONFIRM_FLAG"
+	echo "$(( $(date +%s) + TIMEOUT ))" > "$DEADLINE_FILE"
+	if command -v setsid >/dev/null 2>&1; then
+		TIMEOUT="$TIMEOUT" ARCH="$ARCH" PEER="$PEER" \
+			setsid "$0" _watchdog >> "$LOG" 2>&1 < /dev/null &
+	else
+		TIMEOUT="$TIMEOUT" ARCH="$ARCH" PEER="$PEER" \
+			nohup "$0" _watchdog >> "$LOG" 2>&1 < /dev/null &
+	fi
+	echo $! > "$WATCHDOG_PID"
+}
+
+do_rollback() {
+	if [ ! -f "$BACKUP_DIR/tailscaled.gz" ]; then
+		log "VIRHE: varmuuskopiota ei ole, rollback ei onnistu"
+		return 1
+	fi
+	old="$(cat "$BACKUP_DIR/version" 2>/dev/null)"
+	log "palautetaan versio: $old"
+	/etc/init.d/tailscale stop
+	sleep 1
+	gunzip -c "$BACKUP_DIR/tailscaled.gz" > /usr/sbin/tailscaled.new || return 1
+	gunzip -c "$BACKUP_DIR/tailscale.gz"  > /usr/sbin/tailscale.new  || return 1
+	mv /usr/sbin/tailscaled.new /usr/sbin/tailscaled
+	mv /usr/sbin/tailscale.new  /usr/sbin/tailscale
+	chmod 755 /usr/sbin/tailscaled /usr/sbin/tailscale
+	/etc/init.d/tailscale start
+	sleep 5
+	log "rollback valmis, nyt: $(current_version)"
+	return 0
+}
+
+cmd_check() {
+	echo "nykyinen: $(current_version)"
+	echo "uusin:    $(latest_version)"
+}
+
+cmd_run() {
+	if [ -f "$WATCHDOG_PID" ] && kill -0 "$(cat "$WATCHDOG_PID")" 2>/dev/null; then
+		echo "Edellinen päivitys odottaa yhä vahvistusta. Aja ensin: $0 confirm"
+		exit 1
+	fi
+
+	cur="$(current_version)"
+	new="$(latest_version)"
+	if [ -z "$new" ]; then
+		log "VIRHE: uusinta versiota ei saatu selville"
+		exit 1
+	fi
+	if [ "$cur" = "$new" ]; then
+		echo "Jo uusin: $cur"
+		exit 0
+	fi
+
+	log "päivitetään $cur -> $new ($ARCH)"
+
+	tgz="/tmp/tailscale_${new}_${ARCH}.tgz"
+	dir="/tmp/tailscale_${new}_${ARCH}"
+	rm -rf "$tgz" "$dir" /tmp/ts.sha
+
+	wget -q "https://pkgs.tailscale.com/stable/tailscale_${new}_${ARCH}.tgz" -O "$tgz" || {
+		log "VIRHE: lataus epäonnistui"; exit 1; }
+	wget -q "https://pkgs.tailscale.com/stable/tailscale_${new}_${ARCH}.tgz.sha256" -O /tmp/ts.sha || {
+		log "VIRHE: tarkistussummaa ei saatu"; rm -f "$tgz"; exit 1; }
+
+	if ! (cd /tmp && echo "$(cat /tmp/ts.sha)  $(basename "$tgz")" | sha256sum -c >/dev/null 2>&1); then
+		log "VIRHE: tarkistussumma ei täsmää"
+		rm -f "$tgz" /tmp/ts.sha
+		exit 1
+	fi
+
+	tar xzf "$tgz" -C /tmp || { log "VIRHE: purku epäonnistui"; exit 1; }
+
+	backup_binaries || { log "VIRHE: varmuuskopiointi epäonnistui, ei jatketa"; exit 1; }
+	log "varmuuskopio: $BACKUP_DIR ($cur)"
+
+	install_from "$dir" || {
+		log "VIRHE: asennus epäonnistui, palautetaan"
+		do_rollback
+		exit 1
+	}
+
+	rm -rf "$dir" "$tgz" /tmp/ts.sha
+
+	if ! health_check; then
+		log "terveystarkistus epäonnistui — palautetaan heti"
+		do_rollback
+		exit 1
+	fi
+
+	log "asennettu ja daemon pystyssä: $(current_version)"
+	arm_watchdog
+
+	cat <<EOF
+
+  Päivitys tehty: $cur -> $new
+  Rollback tapahtuu automaattisesti $(( TIMEOUT / 60 )) min $(( TIMEOUT % 60 )) s kuluttua,
+  ellei tätä ennen ajeta:
+
+      ts-update confirm
+
+  Testaa yhteys ULKOPUOLELTA (toiselta tailnet-laitteelta) ennen vahvistusta.
+
+EOF
+}
+
+cmd_confirm() {
+	if [ ! -f "$DEADLINE_FILE" ]; then
+		echo "Mitään ei odota vahvistusta."
+		exit 0
+	fi
+	touch "$CONFIRM_FLAG"
+	disarm
+	log "vahvistettu, rollback peruttu: $(current_version)"
+}
+
+cmd_status() {
+	echo "versio:      $(current_version)"
+	echo "varmuuskopio: $(cat "$BACKUP_DIR/version" 2>/dev/null || echo 'ei ole')"
+	if [ -f "$DEADLINE_FILE" ]; then
+		left=$(( $(cat "$DEADLINE_FILE") - $(date +%s) ))
+		if [ "$left" -gt 0 ]; then
+			echo "ODOTTAA VAHVISTUSTA: rollback ${left} s kuluttua"
+		else
+			echo "vahvistusaika umpeutunut"
+		fi
+	else
+		echo "ei odottavaa päivitystä"
+	fi
+	tailscale status 2>/dev/null | head -2
+}
+
+cmd_watchdog() {
+	sleep "$TIMEOUT"
+	if [ -f "$CONFIRM_FLAG" ]; then
+		exit 0
+	fi
+	log "vahvistusta ei tullut ${TIMEOUT} s kuluessa — automaattinen rollback"
+	do_rollback
+	rm -f "$WATCHDOG_PID" "$DEADLINE_FILE"
+}
+
+case "${1:-}" in
+	check)     cmd_check ;;
+	run)       cmd_run ;;
+	confirm)   cmd_confirm ;;
+	rollback)  disarm; do_rollback ;;
+	status)    cmd_status ;;
+	_watchdog) cmd_watchdog ;;
+	*)
+		sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+		exit 1
+		;;
+esac
