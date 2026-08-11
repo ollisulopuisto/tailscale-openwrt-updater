@@ -443,8 +443,79 @@ case17() {
 	wait "$victim" 2>/dev/null
 }
 
+# netinstall.sh ajetaan tyngällä latauskomennolla ja hiekkalaatikkoon
+# --prefixillä: mitään ei haeta verkosta eikä asenneta oikeaan juureen.
+netinstall() {
+	env -i \
+		PATH="$SB/bin:/usr/bin:/bin" \
+		HOME="$SB" \
+		BASE_URL="http://tynkä/repo" \
+		sh "$SRC/netinstall.sh" --prefix "$SB/fakeroot" -w "$SB/bin/wget" "$@"
+}
+
+case18() {
+	CASE="18 netinstall GitHubista"; setup; say "$CASE"
+	cp "$SRC/ts-update" "$SRC/ts-update.default" "$SRC/ts-update-bootcheck.init" "$SB/www/"
+
+	out="$(netinstall 2>&1)"; rc=$?
+	assert "asennus onnistuu" "$rc" 0
+	assert_file "ts-update paikallaan" "$SB/fakeroot/usr/sbin/ts-update"
+	if [ -x "$SB/fakeroot/usr/sbin/ts-update" ]; then ok "ts-update on ajettava"; else bad "ei ajo-oikeutta"; fi
+	assert_file "boottitarkistus paikallaan" "$SB/fakeroot/etc/init.d/ts-update-bootcheck"
+	assert_file "asetustiedosto luotiin" "$SB/fakeroot/etc/default/ts-update"
+	case "$out" in *sha256*) ok "kertoo tarkistussumman" ;; *) bad "ei summaa: $out" ;; esac
+
+	# laitekohtaiset asetukset eivät saa hävitä uudelleenasennuksessa
+	echo "PEER=100.64.0.1" >> "$SB/fakeroot/etc/default/ts-update"
+	netinstall >/dev/null 2>&1
+	if grep -q '^PEER=100.64.0.1' "$SB/fakeroot/etc/default/ts-update"; then
+		ok "asetuksia ei ylikirjoiteta"
+	else
+		bad "asetustiedosto ylikirjoitettiin"
+	fi
+
+	# oikea tarkistussumma kelpaa, väärä ei
+	sum="$(sha256sum "$SRC/ts-update" | awk '{print $1}')"
+	netinstall -c "$sum" >/dev/null 2>&1
+	assert "oikea tarkistussumma kelpaa" "$?" 0
+	out="$(netinstall -c 0000000000000000000000000000000000000000000000000000000000000000 2>&1)"; rc=$?
+	assert "väärä tarkistussumma torjutaan" "$rc" 1
+	case "$out" in *"ei täsmää"*) ok "kertoo summavirheestä" ;; *) bad "väärä viesti: $out" ;; esac
+
+	# odottava päivitys estää asennuksen ilman --forcea
+	mkdir -p "$SB/fakeroot/root/ts-update"
+	echo "1.98.3 -> 1.100.0" > "$SB/fakeroot/root/ts-update/pending"
+	out="$(netinstall 2>&1)"; rc=$?
+	assert "odottava päivitys estää asennuksen" "$rc" 1
+	case "$out" in *"odottaa yhä vahvistusta"*) ok "kertoo syyn" ;; *) bad "väärä viesti: $out" ;; esac
+	netinstall --force >/dev/null 2>&1
+	assert "--force ohittaa eston" "$?" 0
+	rm -f "$SB/fakeroot/root/ts-update/pending"
+
+	# katkennut lataus ei saa päätyä asennukseen
+	cp "$SB/fakeroot/usr/sbin/ts-update" "$SB/ts-update.ehja"
+	head -c 400 "$SRC/ts-update" > "$SB/www/ts-update"
+	out="$(netinstall 2>&1)"; rc=$?
+	assert "kommenttiotsakkeeseen katkennut lataus torjutaan" "$rc" 1
+	case "$out" in *katkennut*) ok "kertoo syyn" ;; *) bad "väärä viesti: $out" ;; esac
+	head -c 9000 "$SRC/ts-update" > "$SB/www/ts-update"
+	out="$(netinstall 2>&1)"; rc=$?
+	assert "keskeltä katkennut lataus torjutaan" "$rc" 1
+	if cmp -s "$SB/ts-update.ehja" "$SB/fakeroot/usr/sbin/ts-update"; then
+		ok "vanha versio jäi koskematta"
+	else
+		bad "rikkinäinen versio asennettiin"
+	fi
+
+	# poisto jättää asetukset ja tilan rauhaan
+	netinstall --uninstall >/dev/null 2>&1
+	assert_nofile "ts-update poistettu" "$SB/fakeroot/usr/sbin/ts-update"
+	assert_nofile "boottitarkistus poistettu" "$SB/fakeroot/etc/init.d/ts-update-bootcheck"
+	assert_file "asetukset jäivät" "$SB/fakeroot/etc/default/ts-update"
+}
+
 run_suite() {
-	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
+	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
 		want "$n" || continue
 		"case$n"
 	done

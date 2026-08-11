@@ -20,12 +20,24 @@ jobs:
       - name: shellcheck -s sh
         run: |
           shellcheck --version
-          shellcheck -s sh ts-update install.sh ts-update-bootcheck.init tests/run-tests.sh
+          shellcheck -s sh ts-update install.sh netinstall.sh \
+            ts-update-bootcheck.init tests/run-tests.sh
 
       - name: syntaksitarkistus (dash)
         run: |
-          for f in ts-update install.sh ts-update-bootcheck.init tests/run-tests.sh; do
+          for f in ts-update install.sh netinstall.sh ts-update-bootcheck.init tests/run-tests.sh; do
             dash -n "$f" || exit 1
+          done
+
+      # netinstall.sh tunnistaa katkenneen latauksen loppumerkistä, joten
+      # sen on pysyttävä viimeisenä rivinä.
+      - name: loppumerkki paikallaan
+        run: |
+          for f in ts-update ts-update-bootcheck.init; do
+            if [ "$(sed -n '$p' "$f")" != "# ts-update-eof" ]; then
+              echo "$f: viimeinen rivi ei ole loppumerkki" >&2
+              exit 1
+            fi
           done
 
   tests:
