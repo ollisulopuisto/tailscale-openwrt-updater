@@ -48,38 +48,56 @@ EOF
 
 CONFIG_FILE="${CONFIG_FILE:-/etc/default/ts-update}"
 
-_env_ARCH="${ARCH:-}"
-_env_TIMEOUT="${TIMEOUT:-}"
-_env_PEER="${PEER:-}"
-_env_IFACE="${IFACE:-}"
-_env_CHECK_ROUTES="${CHECK_ROUTES:-}"
-_env_HEALTH_WAIT="${HEALTH_WAIT:-}"
+# Kaikki asetukset kulkevat saman järjestyksen läpi: ympäristöstä tullut
+# arvo otetaan talteen ennen asetustiedoston lukemista, jotta tiedosto ei
+# voi ohittaa yhden ajon ympäristömuuttujaa.
+SETTINGS="ARCH TIMEOUT PEER IFACE CHECK_ROUTES HEALTH_WAIT
+	STATE_DIR BACKUP_DIR SBIN_DIR INIT_SCRIPT LOCK_FILE TMP_DIR
+	BASE_URL WGET"
+
+for _s in $SETTINGS; do
+	eval "_env_$_s=\${$_s:-}"
+done
+unset _s
 
 if [ -r "$CONFIG_FILE" ]; then
 	# shellcheck disable=SC1090  # polku on käyttäjän valitsema
 	. "$CONFIG_FILE"
 fi
 
-TIMEOUT="${_env_TIMEOUT:-${TIMEOUT:-300}}"
-PEER="${_env_PEER:-${PEER:-}}"
-IFACE="${_env_IFACE:-${IFACE:-tailscale0}}"
-CHECK_ROUTES="${_env_CHECK_ROUTES:-${CHECK_ROUTES:-1}}"
-HEALTH_WAIT="${_env_HEALTH_WAIT:-${HEALTH_WAIT:-90}}"
+# setting <nimi> <oletus>
+setting() {
+	eval "_e=\${_env_$1:-}; _f=\${$1:-}"
+	if [ -n "$_e" ]; then
+		eval "$1=\$_e"
+	elif [ -n "$_f" ]; then
+		eval "$1=\$_f"
+	else
+		eval "$1=\$2"
+	fi
+}
+
+setting ARCH ''            # tyhjä = tunnistetaan automaattisesti
+setting TIMEOUT 300
+setting PEER ''
+setting IFACE tailscale0
+setting CHECK_ROUTES 1
+setting HEALTH_WAIT 90
 
 # Pysyvä tila /root:issa, ei /tmp:ssä: sen on selvittävä boottauksesta,
 # muuten vahvistamaton päivitys jää voimaan uudelleenkäynnistyksessä.
-# Polut voi ohittaa ympäristöstä; testipeti (tests/run-tests.sh) käyttää
-# tätä ajaakseen koko koneiston oikeaa laitetta koskematta.
-STATE_DIR="${STATE_DIR:-/root/ts-update}"
-BACKUP_DIR="${BACKUP_DIR:-/root/ts-backup}"
-SBIN_DIR="${SBIN_DIR:-/usr/sbin}"
-INIT_SCRIPT="${INIT_SCRIPT:-/etc/init.d/tailscale}"
-LOCK_FILE="${LOCK_FILE:-/var/lock/ts-update.lock}"
-TMP_DIR="${TMP_DIR:-/tmp}"
-BASE_URL="${BASE_URL:-https://pkgs.tailscale.com/stable}"
+# Polut voi ohittaa; testipeti (tests/run-tests.sh) käyttää tätä
+# ajaakseen koko koneiston oikeaa laitetta koskematta.
+setting STATE_DIR /root/ts-update
+setting BACKUP_DIR /root/ts-backup
+setting SBIN_DIR /usr/sbin
+setting INIT_SCRIPT /etc/init.d/tailscale
+setting LOCK_FILE /var/lock/ts-update.lock
+setting TMP_DIR /tmp
+setting BASE_URL https://pkgs.tailscale.com/stable
 # Latauskomento. OpenWrt:llä wget on uclient-fetch; jos laitteella on
 # vain jokin muu hakija, sen voi antaa tässä (odottaa wgetin -q/-T/-O).
-WGET="${WGET:-wget}"
+setting WGET wget
 
 DEADLINE_FILE="$STATE_DIR/deadline"
 PENDING_FILE="$STATE_DIR/pending"
@@ -150,7 +168,6 @@ detect_arch() {
 	esac
 }
 
-ARCH="${_env_ARCH:-${ARCH:-}}"
 [ -n "$ARCH" ] || ARCH="$(detect_arch)"
 
 # --- lukitus ------------------------------------------------------------
@@ -163,7 +180,10 @@ lock_acquire() {
 	mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 
 	if have flock; then
-		exec 9>"$LOCK_FILE" 2>/dev/null || return 1
+		# exec-redirektion epäonnistuminen tappaisi kuoren, joten
+		# kirjoitettavuus varmistetaan ensin tavallisella ohjauksella.
+		: > "$LOCK_FILE" 2>/dev/null || return 1
+		exec 9>"$LOCK_FILE"
 		if [ "$_wait" -gt 0 ]; then
 			flock -w "$_wait" 9 && return 0
 		else
@@ -199,7 +219,14 @@ lock_release() {
 	fi
 }
 
-trap 'lock_release; rm -f "$JSON_CACHE"' EXIT INT TERM
+cleanup() { lock_release; rm -f "$JSON_CACHE"; }
+
+# INT/TERM pitää myös poistua: pelkkä siivousansa jättäisi ajon jatkumaan
+# (Ctrl-C vapauttaisi lukon kesken binäärinvaihdon, eikä disarmin kill
+# tappaisi vahtia lainkaan).
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 # --- levytila -----------------------------------------------------------
 
@@ -353,7 +380,8 @@ snapshot_health() {
 routes_ok() {
 	[ "$CHECK_ROUTES" = "1" ] || return 0
 	[ -s "$EXPECT_ROUTES" ] || return 0
-	prefs_routes | diff - "$EXPECT_ROUTES" >/dev/null 2>&1
+	# Ei diffiä: se ei kuulu OpenWrt:n busyboxin oletusvalikoimaan.
+	[ "$(prefs_routes)" = "$(cat "$EXPECT_ROUTES" 2>/dev/null)" ]
 }
 
 iface_ok() {
@@ -467,19 +495,30 @@ do_rollback() {
 
 # --- vahti --------------------------------------------------------------
 
-pending_active() { [ -f "$DEADLINE_FILE" ]; }
+# Odottava päivitys on kesken myös silloin, kun vahtia ei ehditty
+# virittää: PENDING_FILE kirjoitetaan ennen binäärinvaihtoa, DEADLINE_FILE
+# vasta terveystarkistuksen jälkeen.
+pending_active() { [ -f "$DEADLINE_FILE" ] || [ -f "$PENDING_FILE" ]; }
 
+# PID-tiedosto jää levylle boottauksen yli, mutta prosessi ei. Pelkkä
+# kill -0 osuisi uudelleenkäytettyyn PID:iin, joten varmistetaan /procista
+# että kyseessä on tämä skripti.
 watchdog_alive() {
 	[ -f "$WATCHDOG_PID" ] || return 1
-	kill -0 "$(cat "$WATCHDOG_PID" 2>/dev/null)" 2>/dev/null
+	_wp="$(cat "$WATCHDOG_PID" 2>/dev/null)"
+	case "$_wp" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	kill -0 "$_wp" 2>/dev/null || return 1
+	[ -r "/proc/$_wp/cmdline" ] || return 1
+	tr '\0' ' ' < "/proc/$_wp/cmdline" 2>/dev/null | grep -q ts-update
 }
 
 disarm() {
-	if [ -f "$WATCHDOG_PID" ]; then
+	if watchdog_alive; then
 		kill "$(cat "$WATCHDOG_PID" 2>/dev/null)" 2>/dev/null
-		rm -f "$WATCHDOG_PID"
 	fi
-	rm -f "$DEADLINE_FILE" "$PENDING_FILE"
+	rm -f "$WATCHDOG_PID" "$DEADLINE_FILE" "$PENDING_FILE"
 	sync
 }
 
@@ -667,6 +706,16 @@ cmd_confirm() {
 		echo "Mitään ei odota vahvistusta."
 		exit 0
 	fi
+	# Lukko on vahdilla rollbackin ajan: odotetaan sen verran, ettei
+	# vahvistusta raportoida onnistuneeksi kesken palautuksen.
+	if ! lock_acquire 60; then
+		log "VIRHE: lukkoa ei saatu — rollback saattaa olla käynnissä"
+		exit 1
+	fi
+	if ! pending_active; then
+		log "rollback ehti tapahtua ennen vahvistusta, nyt: $(current_version)"
+		exit 1
+	fi
 	disarm
 	log "vahvistettu, rollback peruttu: $(current_version)"
 }
@@ -685,17 +734,21 @@ cmd_status() {
 	echo "versio:        $(current_version)"
 	echo "varmuuskopio:  $(cat "$BACKUP_DIR/version" 2>/dev/null || echo 'ei ole')"
 	if pending_active; then
-		_left="$(deadline_left)"
 		echo "odottaa:       $(cat "$PENDING_FILE" 2>/dev/null || echo 'päivitys')"
-		if [ "$_left" -gt 0 ]; then
-			echo "ODOTTAA VAHVISTUSTA: rollback ${_left} s kuluttua"
+		if [ ! -f "$DEADLINE_FILE" ]; then
+			echo "KESKEN: päivitys jäi ilman vahtia — aja $0 boot-check tai $0 rollback"
 		else
-			echo "ODOTTAA VAHVISTUSTA: vahvistusaika umpeutunut"
-		fi
-		if watchdog_alive; then
-			echo "vahti:         käynnissä (pid $(cat "$WATCHDOG_PID"))"
-		else
-			echo "vahti:         EI KÄYNNISSÄ — aja $0 boot-check tai $0 rollback"
+			_left="$(deadline_left)"
+			if [ "$_left" -gt 0 ]; then
+				echo "ODOTTAA VAHVISTUSTA: rollback ${_left} s kuluttua"
+			else
+				echo "ODOTTAA VAHVISTUSTA: vahvistusaika umpeutunut"
+			fi
+			if watchdog_alive; then
+				echo "vahti:         käynnissä (pid $(cat "$WATCHDOG_PID"))"
+			else
+				echo "vahti:         EI KÄYNNISSÄ — aja $0 boot-check tai $0 rollback"
+			fi
 		fi
 	else
 		echo "ei odottavaa päivitystä"
@@ -716,6 +769,11 @@ cmd_watchdog() {
 	if ! lock_acquire 120; then
 		log "VAROITUS: lukkoa ei saatu 120 s:ssa, tehdään rollback silti"
 	fi
+	# Vahvistus on voinut tulla juuri lukkoa odotellessa.
+	if ! pending_active; then
+		log "vahvistus ehti tulla — ei palauteta"
+		exit 0
+	fi
 	do_rollback
 	rm -f "$WATCHDOG_PID" "$DEADLINE_FILE" "$PENDING_FILE"
 	sync
@@ -730,6 +788,16 @@ cmd_boot_check() {
 		log "boot-check: lukkoa ei saatu, ohitetaan"
 		exit 1
 	fi
+	# Ei määräaikaa mutta odottava päivitys: boottaus osui binäärinvaihdon
+	# ja vahdin virityksen väliin, eikä uutta versiota ehditty todeta
+	# terveeksi. Vahvistamaton versio ei jää voimaan.
+	if [ ! -f "$DEADLINE_FILE" ]; then
+		log "boot-check: päivitys keskeytyi ennen vahdin viritystä — palautetaan"
+		disarm
+		do_rollback
+		exit 0
+	fi
+
 	_left="$(deadline_left)"
 	# Kello voi hypätä ntp-synkassa; määräaika ei saa venyä alkuperäistä
 	# vahvistusaikaa pidemmäksi.

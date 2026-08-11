@@ -390,8 +390,61 @@ case14() {
 	ts confirm >/dev/null 2>&1
 }
 
+case15() {
+	CASE="15 boottaus binäärinvaihdon ja vahdin virityksen välissä"; setup; say "$CASE"
+	TS_TIMEOUT=120 ts run >/dev/null 2>&1
+	# simuloi: vahti ja määräaika eivät ehtineet levylle, vain pending
+	kill "$(cat "$SB/state/watchdog.pid")" 2>/dev/null
+	rm -f "$SB/state/deadline" "$SB/state/watchdog.pid"
+	sleep 1
+	assert_file "odottava päivitys tiedossa" "$SB/state/pending"
+	out="$(ts status 2>&1)"
+	case "$out" in *"jäi ilman vahtia"*) ok "status kertoo keskeneräisyydestä" ;;
+		*) bad "status ei huomaa: $out" ;; esac
+	out="$(TS_TIMEOUT=120 ts boot-check 2>&1)"
+	case "$out" in *"keskeytyi ennen vahdin viritystä"*) ok "boot-check tunnistaa tilanteen" ;;
+		*) bad "väärä viesti: $out" ;; esac
+	assert "vanha versio takaisin" "$(installed_version)" "$OLD"
+	assert_nofile "tila siivottu" "$SB/state/pending"
+}
+
+case16() {
+	CASE="16 vahvistus samaan aikaan kun vahti palauttaa"; setup; say "$CASE"
+	TS_TIMEOUT=5 ts run >/dev/null 2>&1
+	assert "uusi versio asennettu" "$(installed_version)" "$NEW"
+	# odota kunnes vahti on tehnyt rollbackin, vahvista vasta sitten
+	i=0
+	while [ "$i" -lt 30 ] && [ -f "$SB/state/deadline" ]; do sleep 1; i=$((i + 1)); done
+	sleep 3
+	out="$(ts confirm 2>&1)"; rc=$?
+	assert "confirm ei valehtele onnistumisesta" "$rc" 0
+	case "$out" in *"Mitään ei odota vahvistusta"*|*"rollback ehti tapahtua"*)
+			ok "confirm kertoo todellisen tilan" ;;
+		*) bad "väärä viesti: $out" ;; esac
+	assert "vanha versio voimassa" "$(installed_version)" "$OLD"
+}
+
+case17() {
+	CASE="17 vanhentunut watchdog.pid ei johda vieraan prosessin tappoon"; setup; say "$CASE"
+	TS_TIMEOUT=120 ts run >/dev/null 2>&1
+	kill "$(cat "$SB/state/watchdog.pid")" 2>/dev/null
+	sleep 1
+	# boottauksen jälkeen PID viittaa johonkin aivan muuhun prosessiin
+	sleep 300 &
+	victim=$!
+	echo "$victim" > "$SB/state/watchdog.pid"
+	out="$(ts status 2>&1)"
+	case "$out" in *"vahti:         EI KÄYNNISSÄ"*) ok "status ei usko vierasta PID:iä vahdiksi" ;;
+		*) bad "status luuli vahtia eläväksi: $out" ;; esac
+	ts confirm >/dev/null 2>&1
+	sleep 1
+	if kill -0 "$victim" 2>/dev/null; then ok "vieras prosessi jäi henkiin"; else bad "disarm tappoi väärän prosessin"; fi
+	kill "$victim" 2>/dev/null
+	wait "$victim" 2>/dev/null
+}
+
 run_suite() {
-	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
 		want "$n" || continue
 		"case$n"
 	done

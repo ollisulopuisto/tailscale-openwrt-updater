@@ -170,6 +170,9 @@ ajetaan kahdesti, jos `python3` löytyy: kerran sed-varapolulla ja kerran
 | Boottaus vahvistusikkunassa, daemon rikki | rollback heti | 12 |
 | Mainostetut reitit katoavat | terveystarkistus kaatuu, rollback | 13 |
 | `check` ja `status` | näyttävät version, paketin ja vahvistustilan | 14 |
+| Boottaus binäärinvaihdon ja vahdin virityksen välissä | rollback, ei jää voimaan | 15 |
+| Vahvistus samaan aikaan kun vahti palauttaa | `confirm` kertoo todellisen tilan | 16 |
+| Vanhentunut `watchdog.pid` boottauksen jälkeen | ei tapa vierasta prosessia | 17 |
 
 Testaamatta oikealla laitteella: `mipsle`, `mips`, `mips64`, `arm`,
 `amd64`, `386`, `riscv64`. Ajossa: aarch64 / OpenWrt 25.12.5.
