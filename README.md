@@ -143,7 +143,10 @@ Polut `STATE_DIR`, `BACKUP_DIR`, `SBIN_DIR`, `INIT_SCRIPT`, `TMP_DIR`,
    mainostetut reitit samat kuin ennen päivitystä, ja valinnainen
    `tailscale ping PEER`. Epäonnistuminen palauttaa vanhan version heti.
 7. **Vahti** (`setsid`illä irrotettu taustaprosessi) palauttaa vanhan
-   version, ellei `confirm` tule määräajassa.
+   version, ellei `confirm` tule määräajassa. Määräaikaa mitataan
+   monotonisesta `/proc/uptime`-laskurista, joten ntp:n askel ei katkaise
+   vahvistusikkunaa kesken kaiken; seinäkellon aikaleima on varapolku,
+   joka kestää uudelleenkäynnistyksen.
 8. **Boottitarkistus**: odottava päivitys tallennetaan `/root`iin, ja
    `/etc/init.d/ts-update-bootcheck` jatkaa vahtia jäljellä olevalla
    ajalla tai tekee rollbackin, jos daemon ei noussut tai määräaika ehti
@@ -157,15 +160,36 @@ ole, käytetään sed-varapolkua.
 
 ## Pienen flashin laitteet (16 MB)
 
-Ylävirran binäärit ovat purettuna isot: `tailscaled` ~29 MB ja erillinen
-`tailscale` ~14 MB, eli noin **45 MB** asennuskohteeseen. Feedin paketti
-mahtuu, koska se on imagessa squashfs-pakattuna (~10 MB) ja koska siinä
-CLI on käännetty daemoniin mukaan — `/usr/sbin/tailscale` on symlinkki
-`tailscaled`iin.
+Ylävirran binäärit ovat purettuna isot. Mitattu 1.102.2 / mipsle:
 
-Esimerkki laitteesta, jolla tämä ei onnistu (ramips/mt7621, 16 MB flash):
+| | koko |
+|---|---|
+| `tailscaled` | 38.7 MiB |
+| `tailscale` | 31.7 MiB |
+| **yhteensä asennuskohteeseen** | **70.4 MiB** |
+| tarballi (lataus) | 32.3 MiB |
+| purku + tarballi yhtä aikaa `/tmp`:ssä | ~103 MiB |
 
-    /overlay   16.0M  vapaana 14.7M      tarve ~45M
+Vertailun vuoksi feedin binääri samalla laitteella on **29.1 MiB** — yksi
+tiedosto, jossa CLI on käännetty daemoniin mukaan (`/usr/sbin/tailscale`
+on symlinkki `tailscaled`iin), ja imagessa se on vielä squashfs-pakattuna
+noin 10 MB:iin. Siksi feedin versio mahtuu sinne minne ylävirran ei ole
+mitään asiaa.
+
+Esimerkki laitteesta, jolla tämä ei onnistu (ramips/mt7621, 16 MB flash,
+128 MB RAM):
+
+    /overlay   16.0M  vapaana 14.7M      tarve 70.4M
+    tmpfs      58.0M  vapaana 57.6M      tarve 103M (lataus + purku)
+
+**Älä yritä väistää tätä `/tmp`:n kautta.** `tmpfs` on RAMia, ja sen
+sivut voi vapauttaa vain swapiin — toisin kuin oikean tiedostojärjestelmän
+sivuvälimuisti, jonka kernel voi kirjoittaa levylle ja unohtaa. Isoja
+tiedostoja `/tmp`:hen kopioitaessa pienimuistinen laite ajautuu siis
+swappaamaan, ja jos swap on samalla levyllä jolta luetaan, I/O jumittuu
+niin pahasti ettei laitteistovahti saa vastausta ja laite resetoituu.
+Näin kävi testissä: 128 MB:n laudalla 40 MB:n kopiointi `/tmp`:hen bootasi
+reitittimen kesken kopion. Lataa ja pura aina oikealle levylle.
 
 `ts-update check` kertoo tilanteen suoraan, ja `ts-update run` keskeytyy
 ennen kuin mitään on ladattu. Vaihtoehdot:
@@ -290,7 +314,22 @@ ajetaan kahdesti, jos `python3` löytyy: kerran sed-varapolulla ja kerran
 | `netinstall.sh` GitHubista | asentaa, ei ylikirjoita asetuksia, torjuu katkenneen latauksen | 18 |
 | Feedin symlink-asettelu | varmuuskopio linkkinä, rollback palauttaa symlinkin | 19 |
 | Asennuskohde täynnä | keskeytys ennen latausta | 20 |
+| Kellon hyppy vahvistusikkunassa | ei ennenaikaista rollbackia | 21 |
+| Työhakemisto puuttuu | luodaan itse, virhe kertoo syyn | 22 |
 
-Testaamatta oikealla laitteella: `mipsle`, `mips`, `mips64`, `arm`,
-`amd64`, `386`, `riscv64`. Ajossa: aarch64 / OpenWrt 25.12.5.
-`ts-update check` kertoo heti, osuiko arkkitehtuurin tunnistus oikeaan.
+### Todettu oikealla laitteella
+
+| Arkkitehtuuri | Laite | Tulos |
+|---|---|---|
+| `arm64` | aarch64 / OpenWrt 25.12.5 | ts-update ajossa, päivitykset vahtineen |
+| `mipsle` | ramips/mt7621, `DISTRIB_ARCH=mipsel_24kc` | ylävirran binääri toimii, `detect_arch` osuu oikeaan |
+
+`mipsle`-laitteella binäärit ajetaan USB-levyltä symlinkkien takaa (ks.
+edellä): 16 MB:n flashiin ne eivät mahdu, mutta itse binääri nousi
+pystyyn ja liittyi tailnetiin normaalisti (`Starting -> Running`,
+`--state /etc/tailscale/tailscaled.state` luettiin, ei uudelleen­
+autentikointia). Muistinkulutus 31 MiB RSS 116 MiB:n laitteella.
+
+Testaamatta yhä: `mips`, `mips64`, `mips64le`, `arm`, `amd64`, `386`,
+`riscv64`. `ts-update check` kertoo heti, osuiko arkkitehtuurin
+tunnistus oikeaan, ja väärä arvaus torjutaan ennen latausta.
