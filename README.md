@@ -179,10 +179,14 @@ Esimerkki laitteesta, jolla tämä ei onnistu (ramips/mt7621, 16 MB flash,
     /overlay   16.0M  vapaana 14.7M      tarve 70.4M
     tmpfs      58.0M  vapaana 57.6M      tarve 103M (lataus + purku)
 
-**Älä yritä väistää tätä `/tmp`:n kautta.** `tmpfs` on RAMia: binäärien
-kopiointi sinne pienimuistisella laitteella syö muistin ja kaataa
-reitittimen. Tämä on testattu — laite bootasi kesken kopion. Lataa ja pura
-aina USB-levyllä, älä `/tmp`:ssä.
+**Älä yritä väistää tätä `/tmp`:n kautta.** `tmpfs` on RAMia, ja sen
+sivut voi vapauttaa vain swapiin — toisin kuin oikean tiedostojärjestelmän
+sivuvälimuisti, jonka kernel voi kirjoittaa levylle ja unohtaa. Isoja
+tiedostoja `/tmp`:hen kopioitaessa pienimuistinen laite ajautuu siis
+swappaamaan, ja jos swap on samalla levyllä jolta luetaan, I/O jumittuu
+niin pahasti ettei laitteistovahti saa vastausta ja laite resetoituu.
+Näin kävi testissä: 128 MB:n laudalla 40 MB:n kopiointi `/tmp`:hen bootasi
+reitittimen kesken kopion. Lataa ja pura aina oikealle levylle.
 
 `ts-update check` kertoo tilanteen suoraan, ja `ts-update run` keskeytyy
 ennen kuin mitään on ladattu. Vaihtoehdot:
