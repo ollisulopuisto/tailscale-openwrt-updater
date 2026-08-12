@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 env:
-  # shellcheck kaatuu skandeihin, jos locale on pelkkä C
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # shellcheck fails on non-ASCII characters if locale is plain C
   LC_ALL: C.UTF-8
 
 jobs:
@@ -23,35 +24,35 @@ jobs:
           shellcheck -s sh ts-update install.sh netinstall.sh \
             ts-update-bootcheck.init tests/run-tests.sh
 
-      - name: syntaksitarkistus (dash)
+      - name: syntax check (dash)
         run: |
           for f in ts-update install.sh netinstall.sh ts-update-bootcheck.init tests/run-tests.sh; do
             dash -n "$f" || exit 1
           done
 
-      # netinstall.sh tunnistaa katkenneen latauksen loppumerkistä, joten
-      # sen on pysyttävä viimeisenä rivinä.
-      - name: loppumerkki paikallaan
+      # netinstall.sh detects truncated downloads by end marker, so
+      # it must remain on the last line.
+      - name: EOF marker intact
         run: |
           for f in ts-update ts-update-bootcheck.init; do
             if [ "$(sed -n '$p' "$f")" != "# ts-update-eof" ]; then
-              echo "$f: viimeinen rivi ei ole loppumerkki" >&2
+              echo "$f: last line is not EOF marker" >&2
               exit 1
             fi
           done
 
   tests:
-    name: testit (${{ matrix.shell }})
+    name: tests (${{ matrix.shell }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # dash = tiukka POSIX, busybox ash = sama kuin OpenWrt:llä
+        # dash = strict POSIX, busybox ash = same shell as OpenWrt
         shell: [dash, busybox]
     steps:
       - uses: actions/checkout@v4
 
-      - name: asenna busybox
+      - name: install busybox
         if: matrix.shell == 'busybox'
         run: |
           sudo apt-get update -qq
@@ -60,7 +61,7 @@ jobs:
           sudo chmod 755 /usr/local/bin/bbsh
           busybox sh -c 'echo busybox ash ok'
 
-      - name: aja testimatriisi
+      - name: run test matrix
         timeout-minutes: 15
         run: |
           if [ "${{ matrix.shell }}" = busybox ]; then

@@ -1,29 +1,27 @@
-# Esimerkki: /etc/default/ts-update
+# Example: /etc/default/ts-update
 #
-# Laitekohtaiset asetukset. Ympäristömuuttujat voittavat tämän tiedoston,
-# joten yksittäisen ajon voi aina ohittaa: TIMEOUT=900 ts-update run
+# Device-specific configuration settings. Environment variables take precedence over
+# this file, so any single execution can be overridden: TIMEOUT=900 ts-update run
 
-# Binääriarkkitehtuuri. Tyhjänä tunnistetaan automaattisesti ja
-# tarkistetaan pkgs.tailscale.comin listaa vasten.
+# Binary architecture. If empty, automatically detected and verified against
+# the pkgs.tailscale.com package list.
 #ARCH=arm64
 
-# Vahvistusaika sekunteina ennen automaattista rollbackia.
+# Confirmation window in seconds before automatic rollback triggers.
 TIMEOUT=300
 
-# Tailnet-osoite, johon pingataan terveystestissä. Kannattaa olla laite,
-# joka on aina päällä ja jonka kautta yhteys tähän reitittimeen kulkee.
+# Tailnet IP or hostname to ping during health test. Recommended to choose a
+# device that is always online and through which traffic to this router flows.
 #PEER=100.74.52.79
 
-# Verkkoliitäntä, jonka olemassaolo tarkistetaan päivityksen jälkeen.
+# Network interface whose existence is checked after an update.
 #IFACE=tailscale0
 
-# 1 = varmista, että mainostetut reitit (subnet router / exit node)
-# ovat päivityksen jälkeen samat kuin ennen sitä.
+# 1 = verify advertised routes (subnet router / exit node) remain unchanged after update.
 CHECK_ROUTES=1
 
-# Sekunteja, joita odotetaan daemonin nousemista ennen kuin päivitys
-# tulkitaan epäonnistuneeksi.
+# Seconds to wait for daemon startup before considering update failed.
 HEALTH_WAIT=90
 
-# Latauskomento, jos laitteella ei ole wgetiä tavallisessa paikassa.
+# Download command if device wget is in a non-standard location.
 #WGET=uclient-fetch

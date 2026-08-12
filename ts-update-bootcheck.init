@@ -1,22 +1,22 @@
 #!/bin/sh /etc/rc.common
-# Asennetaan nimellä /etc/init.d/ts-update-bootcheck ja otetaan käyttöön:
+# Install as /etc/init.d/ts-update-bootcheck and enable:
 #   /etc/init.d/ts-update-bootcheck enable
 #
-# Vahvistusta odottava päivitys elää /root/ts-update-hakemistossa, mutta
-# vahtiprosessi ei selviä boottauksesta. Tämä käynnistää sen uudelleen
-# jäljellä olevaksi ajaksi — tai tekee rollbackin, jos määräaika ehti
-# umpeutua tai daemon ei nouse.
+# An unconfirmed update lives in the /root/ts-update directory, but
+# the watchdog process does not survive a reboot. This restarts it
+# for the remaining window duration — or performs an automatic rollback
+# if the deadline expired or the daemon failed to start.
 
-# shellcheck disable=SC2034  # rc.common lukee nämä
+# shellcheck disable=SC2034  # rc.common reads these
 START=99
 # shellcheck disable=SC2034
 STOP=99
 
 start() {
 	[ -x /usr/sbin/ts-update ] || return 0
-	# Taustalle: terveystarkistus odottaa daemonia jopa puolitoista
-	# minuuttia, eikä boottia ole syytä jumittaa sen ajaksi. Jos mitään ei
-	# odota vahvistusta, boot-check poistuu heti itsestään.
+	# Background execution: health check waits for daemon up to 90
+	# seconds, and reboot should not be blocked during that time.
+	# If nothing is pending confirmation, boot-check exits immediately.
 	/usr/sbin/ts-update boot-check >/dev/null 2>&1 &
 }
 

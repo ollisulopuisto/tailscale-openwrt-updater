@@ -1,56 +1,55 @@
 #!/bin/sh
-# ts-update — Tailscalen puoliautomaattinen päivitys OpenWrt:llä.
+# ts-update — Semi-automated Tailscale updates on OpenWrt.
 #
-#   ts-update check             näytä nykyinen ja uusin versio
-#   ts-update run [--dry-run]   päivitä, terveystarkistus, viritä vahti
-#   ts-update confirm           vahvista onnistunut päivitys (peruu rollbackin)
-#   ts-update rollback          palauta edellinen versio heti
-#   ts-update status            näytä tila ja jäljellä oleva vahvistusaika
-#   ts-update boot-check        boottauksen jälkeen: jatka tai peru odottava päivitys
+#   ts-update check             show current and latest version
+#   ts-update run [--dry-run]   update, run health check, arm watchdog
+#   ts-update confirm           confirm successful update (cancels rollback)
+#   ts-update rollback          restore previous version immediately
+#   ts-update status            show status and remaining confirmation time
+#   ts-update boot-check        after boot: resume watchdog or rollback pending update
 #
-# Asetukset ympäristömuuttujina tai tiedostossa /etc/default/ts-update
-# (ympäristö voittaa tiedoston):
-#   ARCH=arm64        ohita arkkitehtuurin automaattitunnistus
-#   TIMEOUT=300       sekuntia vahvistusaikaa ennen automaattista rollbackia
-#   PEER=100.74.52.79 valinnainen tailnet-osoite, johon pingataan terveystestissä
-#   IFACE=tailscale0  verkkoliitäntä, jonka olemassaolo tarkistetaan
-#   CHECK_ROUTES=1    varmista että mainostetut reitit säilyvät päivityksessä
-#   HEALTH_WAIT=90    sekuntia, joita odotetaan daemonin nousemista
-#   WGET=wget         latauskomento (odottaa wgetin -q/-T/-O-valitsimia)
+# Configuration via environment variables or /etc/default/ts-update
+# (environment variables take precedence over config file):
+#   ARCH=arm64        override automatic architecture detection
+#   TIMEOUT=300       seconds for confirmation window before auto-rollback
+#   PEER=100.74.52.79 optional tailnet IP/hostname to ping in health test
+#   IFACE=tailscale0  network interface whose existence is checked
+#   CHECK_ROUTES=1    verify advertised routes are preserved across update
+#   HEALTH_WAIT=90    seconds to wait for daemon to start
+#   WGET=wget         download command (expects wget-compatible -q/-T/-O flags)
 
 set -u
 
 usage() {
 	cat <<'EOF'
-ts-update — Tailscalen puoliautomaattinen päivitys OpenWrt:llä.
+ts-update — Semi-automated Tailscale updates on OpenWrt.
 
-  ts-update check             näytä nykyinen ja uusin versio
-  ts-update run [--dry-run]   päivitä, terveystarkistus, viritä vahti
-  ts-update confirm           vahvista onnistunut päivitys (peruu rollbackin)
-  ts-update rollback          palauta edellinen versio heti
-  ts-update status            näytä tila ja jäljellä oleva vahvistusaika
-  ts-update boot-check        boottauksen jälkeen: jatka tai peru odottava päivitys
+  ts-update check             show current and latest version
+  ts-update run [--dry-run]   update, run health check, arm watchdog
+  ts-update confirm           confirm successful update (cancels rollback)
+  ts-update rollback          restore previous version immediately
+  ts-update status            show status and remaining confirmation time
+  ts-update boot-check        after boot: resume watchdog or rollback pending update
 
-Asetukset ympäristömuuttujina tai tiedostossa /etc/default/ts-update
-(ympäristö voittaa tiedoston):
+Configuration via environment variables or /etc/default/ts-update
+(environment variables take precedence over config file):
 
-  ARCH=arm64        ohita arkkitehtuurin automaattitunnistus
-  TIMEOUT=300       sekuntia vahvistusaikaa ennen automaattista rollbackia
-  PEER=100.74.52.79 valinnainen tailnet-osoite, johon pingataan terveystestissä
-  IFACE=tailscale0  verkkoliitäntä, jonka olemassaolo tarkistetaan
-  CHECK_ROUTES=1    varmista että mainostetut reitit säilyvät päivityksessä
-  HEALTH_WAIT=90    sekuntia, joita odotetaan daemonin nousemista
-  WGET=wget         latauskomento (odottaa wgetin -q/-T/-O-valitsimia)
+  ARCH=arm64        override automatic architecture detection
+  TIMEOUT=300       seconds for confirmation window before auto-rollback
+  PEER=100.74.52.79 optional tailnet IP/hostname to ping in health test
+  IFACE=tailscale0  network interface whose existence is checked
+  CHECK_ROUTES=1    verify advertised routes are preserved across update
+  HEALTH_WAIT=90    seconds to wait for daemon to start
+  WGET=wget         download command (expects wget-compatible -q/-T/-O flags)
 EOF
 }
 
-# --- asetukset: ympäristö > /etc/default/ts-update > oletus -------------
+# --- settings: environment > /etc/default/ts-update > default -------------
 
 CONFIG_FILE="${CONFIG_FILE:-/etc/default/ts-update}"
 
-# Kaikki asetukset kulkevat saman järjestyksen läpi: ympäristöstä tullut
-# arvo otetaan talteen ennen asetustiedoston lukemista, jotta tiedosto ei
-# voi ohittaa yhden ajon ympäristömuuttujaa.
+# All settings go through the same order: values from environment are captured
+# before reading config file so the file cannot override a single-run env var.
 SETTINGS="ARCH TIMEOUT PEER IFACE CHECK_ROUTES HEALTH_WAIT
 	STATE_DIR BACKUP_DIR SBIN_DIR INIT_SCRIPT LOCK_FILE TMP_DIR
 	BASE_URL WGET"
@@ -61,11 +60,11 @@ done
 unset _s
 
 if [ -r "$CONFIG_FILE" ]; then
-	# shellcheck disable=SC1090  # polku on käyttäjän valitsema
+	# shellcheck disable=SC1090  # path chosen by user
 	. "$CONFIG_FILE"
 fi
 
-# setting <nimi> <oletus>
+# setting <name> <default>
 setting() {
 	eval "_e=\${_env_$1:-}; _f=\${$1:-}"
 	if [ -n "$_e" ]; then
@@ -77,17 +76,17 @@ setting() {
 	fi
 }
 
-setting ARCH ''            # tyhjä = tunnistetaan automaattisesti
+setting ARCH ''            # empty = auto-detect
 setting TIMEOUT 300
 setting PEER ''
 setting IFACE tailscale0
 setting CHECK_ROUTES 1
 setting HEALTH_WAIT 90
 
-# Pysyvä tila /root:issa, ei /tmp:ssä: sen on selvittävä boottauksesta,
-# muuten vahvistamaton päivitys jää voimaan uudelleenkäynnistyksessä.
-# Polut voi ohittaa; testipeti (tests/run-tests.sh) käyttää tätä
-# ajaakseen koko koneiston oikeaa laitetta koskematta.
+# Persistent state in /root, not /tmp: must survive a reboot,
+# otherwise unconfirmed updates would become permanent across reboots.
+# Paths can be overridden; test suite (tests/run-tests.sh) uses this
+# to run everything in a sandbox without touching the host device.
 setting STATE_DIR /root/ts-update
 setting BACKUP_DIR /root/ts-backup
 setting SBIN_DIR /usr/sbin
@@ -95,8 +94,8 @@ setting INIT_SCRIPT /etc/init.d/tailscale
 setting LOCK_FILE /var/lock/ts-update.lock
 setting TMP_DIR /tmp
 setting BASE_URL https://pkgs.tailscale.com/stable
-# Latauskomento. OpenWrt:llä wget on uclient-fetch; jos laitteella on
-# vain jokin muu hakija, sen voi antaa tässä (odottaa wgetin -q/-T/-O).
+# Download command. On OpenWrt wget is uclient-fetch; if device only has
+# another fetcher, it can be passed here (expects wget flags -q/-T/-O).
 setting WGET wget
 
 DEADLINE_FILE="$STATE_DIR/deadline"
@@ -107,14 +106,14 @@ EXPECT_ROUTES="$STATE_DIR/expect.routes"
 EXPECT_IFACE="$STATE_DIR/expect.iface"
 LOG="$STATE_DIR/ts-update.log"
 LOCK_DIR_HELD=""
-# Välimuisti on ajokohtainen ($$) ja siivotaan lopuksi: pysyvä tiedosto
-# /tmp:ssä näyttäisi vanhaa versiolistaa seuraavallakin ajolla.
+# Cache is run-specific ($$) and cleaned up at exit: persistent file
+# in /tmp would show stale version list on subsequent runs.
 JSON_CACHE="$TMP_DIR/ts-update.stable.$$.json"
 
-# Alaraja työtilalle ennen latausta, kilotavuina. Mitattu: 1.102.2 mipsle
-# -tarballi on 32.3 MiB, joten pelkkä lataus vaatii sen verran. Tarkka
-# vaatimus lasketaan vasta kun tarballin koko tiedetään; tämä on vain
-# karkea seula, joka torjuu tyystin liian pienen /tmp:n heti.
+# Lower bound for work directory space before download, in KiB. Measured:
+# 1.102.2 mipsle tarball is 32.3 MiB, so download alone needs that much.
+# Exact requirement calculated once tarball size is known; this is a rough filter
+# to reject an obviously too-small /tmp immediately.
 NEED_TMP_KIB=40960
 LOG_MAX_BYTES=262144
 
@@ -123,9 +122,9 @@ mkdir -p "$TMP_DIR" 2>/dev/null || true
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Konsolikopio menee stderriin, ei stdoutiin: latest_version ja
-# tarball_list ajetaan $( ):n sisällä, ja stdoutiin kirjoitettu
-# lokirivi päätyisi niiden paluuarvoksi.
+# Console copy goes to stderr, not stdout: latest_version and
+# tarball_list run inside $( ), and a log line on stdout would
+# become part of their return value.
 log() {
 	_msg="$(date '+%F %T') $*"
 	echo "$_msg" >&2
@@ -139,17 +138,17 @@ log() {
 	logger -t ts-update "$*" 2>/dev/null || true
 }
 
-# --- arkkitehtuuri ------------------------------------------------------
+# --- architecture -------------------------------------------------------
 
-# Päättelee Tailscalen tarball-arkkitehtuurin. OpenWrt:n DISTRIB_ARCH on
-# luotettavin lähde; uname -m sanoo little-endian-MIPSillä pelkkä "mips",
-# joten siinä tapauksessa tavujärjestys luetaan ELF-otsakkeesta.
-# Arvaus tarkistetaan vielä palvelimen Tarballs-listaa vasten (ks.
-# tarball_available), joten väärä arvaus huomataan ennen latausta.
+# Detects Tailscale tarball architecture. OpenWrt's DISTRIB_ARCH is the
+# most reliable source; uname -m returns just "mips" on little-endian MIPS,
+# so in that case byte order is read from ELF header.
+# Guess is verified against server's Tarballs list (see tarball_available),
+# so an incorrect guess is caught before downloading.
 detect_arch() {
 	a=""
 	if [ -r /etc/openwrt_release ]; then
-		# shellcheck disable=SC1091  # laitteen oma tiedosto, ei repossa
+		# shellcheck disable=SC1091  # device release file, not in repo
 		a="$(. /etc/openwrt_release 2>/dev/null; echo "${DISTRIB_ARCH:-}")"
 	fi
 	[ -n "$a" ] || a="$(uname -m)"
@@ -162,7 +161,7 @@ detect_arch() {
 		mips64*)             echo mips64 ;;
 		mipsel*|mipsle*)     echo mipsle ;;
 		mips*)
-			# uname-fallback: 6. tavu ELF-otsakkeessa on 01 = little-endian
+			# uname fallback: byte 6 in ELF header is 01 = little-endian
 			if [ "$(od -An -t x1 -j 5 -N 1 /bin/busybox 2>/dev/null | tr -d ' ')" = "01" ]; then
 				echo mipsle
 			else
@@ -177,18 +176,17 @@ detect_arch() {
 
 [ -n "$ARCH" ] || ARCH="$(detect_arch)"
 
-# --- lukitus ------------------------------------------------------------
+# --- locking ------------------------------------------------------------
 
-# Estää kaksi päällekkäistä binäärinvaihtoa. flock löytyy busyboxista;
-# jos ei löydy, käytetään hakemistolukkoa, joka siivotaan jos lukon
-# ottanut prosessi on kuollut.
+# Prevents concurrent binary update operations. flock is in busybox;
+# if missing, directory lock is used, cleaned up if lock-owning process is dead.
 lock_acquire() {
 	_wait="${1:-0}"
 	mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 
 	if have flock; then
-		# exec-redirektion epäonnistuminen tappaisi kuoren, joten
-		# kirjoitettavuus varmistetaan ensin tavallisella ohjauksella.
+		# exec redirection failure would kill shell, so writeability
+		# is checked first with normal redirection.
 		: > "$LOCK_FILE" 2>/dev/null || return 1
 		exec 9>"$LOCK_FILE"
 		if [ "$_wait" -gt 0 ]; then
@@ -228,17 +226,15 @@ lock_release() {
 
 cleanup() { lock_release; rm -f "$JSON_CACHE"; }
 
-# INT/TERM pitää myös poistua: pelkkä siivousansa jättäisi ajon jatkumaan
-# (Ctrl-C vapauttaisi lukon kesken binäärinvaihdon, eikä disarmin kill
-# tappaisi vahtia lainkaan).
+# INT/TERM must also exit: simple cleanup trap would leave execution running
+# (Ctrl-C would release lock during binary swap, and disarm kill wouldn't kill watchdog).
 trap 'cleanup' EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
-# --- levytila -----------------------------------------------------------
+# --- disk space ---------------------------------------------------------
 
-# df:n Available on kolmanneksi viimeinen kenttä myös silloin, kun
-# laitenimi työntää rivin ensimmäisen sarakkeen leveäksi.
+# df Available is 3rd field from end even when device name pushes line wide.
 free_kib() { df -k "$1" 2>/dev/null | awk 'END { print $(NF-2) }'; }
 
 file_kib() {
@@ -251,16 +247,16 @@ file_kib() {
 	echo "$_sum"
 }
 
-need_space() {  # need_space <polku> <KiB> <selite>
+need_space() {  # need_space <path> <KiB> <description>
 	_p="$1"; _need="$2"; _what="$3"
 	_free="$(free_kib "$_p")"
 	case "$_free" in
 		''|*[!0-9]*)
-			log "VAROITUS: $_p: vapaata tilaa ei saatu selville, jatketaan"
+			log "WARNING: $_p: free space could not be determined, proceeding"
 			return 0 ;;
 	esac
 	if [ "$_free" -lt "$_need" ]; then
-		log "VIRHE: $_p: vapaana ${_free} KiB, $_what vaatii ${_need} KiB"
+		log "ERROR: $_p: $_free KiB free, $_what requires $_need KiB"
 		return 1
 	fi
 	return 0
@@ -268,15 +264,14 @@ need_space() {  # need_space <polku> <KiB> <selite>
 
 # --- JSON ---------------------------------------------------------------
 
-# jsonfilter (libubox) on OpenWrt:ssä vakiona. sed-varapolku on jäljellä
-# siltä varalta, että sitä ei ole — se on hauraampi mutta parempi kuin
-# ei mitään.
+# jsonfilter (libubox) is standard on OpenWrt. sed fallback remains
+# in case it is absent — more fragile but better than nothing.
 fetch_stable_json() {
 	[ -s "$JSON_CACHE" ] && return 0
-	# Työhakemisto voi olla asetuksissa osoitettu levylle, jota ei ole
-	# luotu. Ilman tätä lataus epäonnistuisi kertomatta miksi.
+	# Work directory in settings might point to uncreated disk path.
+	# Without this, download fails silently without reason.
 	if ! mkdir -p "$TMP_DIR" 2>/dev/null || [ ! -w "$TMP_DIR" ]; then
-		log "VIRHE: työhakemistoon ei voi kirjoittaa: $TMP_DIR"
+		log "ERROR: cannot write to working directory: $TMP_DIR"
 		return 1
 	fi
 	if ! "$WGET" -q -T 30 -O "$JSON_CACHE" "$BASE_URL/?mode=json" 2>/dev/null; then
@@ -287,7 +282,7 @@ fetch_stable_json() {
 	return 0
 }
 
-# json_string <tiedosto> <jsonfilter-lauseke> <kentän nimi sed-varapolulle>
+# json_string <file> <jsonfilter-expression> <sed-fallback-key-name>
 json_string() {
 	_f="$1"; _expr="$2"; _key="$3"
 	if have jsonfilter; then
@@ -307,7 +302,7 @@ latest_version() {
 	json_string "$JSON_CACHE" '@.TarballsVersion' TarballsVersion
 }
 
-# Palvelimen tarjoamat tarballit, esim. tailscale_1.102.2_arm64.tgz.
+# Server tarballs, e.g., tailscale_1.102.2_arm64.tgz.
 tarball_list() {
 	fetch_stable_json || return 1
 	if have jsonfilter; then
@@ -317,7 +312,7 @@ tarball_list() {
 			return 0
 		fi
 	fi
-	# shellcheck disable=SC2020  # tarkoituksella merkki kerrallaan rivinvaihdoksi
+	# shellcheck disable=SC2020  # intentional character replace for newline
 	tr ',{}' '\n\n\n' < "$JSON_CACHE" \
 		| sed -n 's/.*"\(tailscale_[^"]*\.tgz\)".*/\1/p'
 }
@@ -326,23 +321,23 @@ available_arches() {
 	tarball_list | sed -n 's/^tailscale_[^_]*_\(.*\)\.tgz$/\1/p' | sort | tr '\n' ' '
 }
 
-# 0 = kyseinen versio/arkkitehtuuri on olemassa palvelimella.
-tarball_available() {  # tarball_available <versio> <arch>
+# 0 = version/architecture exists on server.
+tarball_available() {  # tarball_available <version> <arch>
 	tarball_list | grep -qxF "tailscale_$1_$2.tgz"
 }
 
-# --- versiot ------------------------------------------------------------
+# --- versions -----------------------------------------------------------
 
-# OpenWrt-paketti raportoi "1.98.3-1 (OpenWrt)" mutta ylävirran
-# TarballsVersion on "1.98.3". Vertailu tehdään vain numero-osasta,
-# ettei feed-versio näytä ikuisesti eri versiolta kuin ylävirta.
+# OpenWrt package reports "1.98.3-1 (OpenWrt)" but upstream
+# TarballsVersion is "1.98.3". Comparison is done on numeric part only,
+# so feed version doesn't permanently look like a different version than upstream.
 normalize_version() {
 	printf '%s\n' "${1:-}" | awk '{print $1}' | sed 's/^v//; s/[-_].*$//'
 }
 
 current_version() { tailscale version 2>/dev/null | head -n1; }
 
-# 0 = $1 on aidosti uudempi kuin $2
+# 0 = $1 is genuinely newer than $2
 version_newer() {
 	_a="$(normalize_version "$1")"
 	_b="$(normalize_version "$2")"
@@ -352,7 +347,7 @@ version_newer() {
 	[ "$_first" = "$_b" ]
 }
 
-# --- terveystarkistus ---------------------------------------------------
+# --- health check -------------------------------------------------------
 
 backend_state() {
 	if have jsonfilter; then
@@ -382,9 +377,8 @@ prefs_routes() {
 
 iface_exists() { [ -e "/sys/class/net/$IFACE" ]; }
 
-# Talteen se, mitä ennen päivitystä oli pystyssä: pelkkä "Running" ei
-# riitä subnet-reitittimellä tai exit nodella, jos mainostetut reitit
-# katoavat prefseistä.
+# Save state prior to update: "Running" alone is not enough for subnet router
+# or exit node if advertised routes disappear from prefs.
 snapshot_health() {
 	if iface_exists; then echo 1 > "$EXPECT_IFACE"; else echo 0 > "$EXPECT_IFACE"; fi
 	prefs_routes > "$EXPECT_ROUTES" 2>/dev/null || : > "$EXPECT_ROUTES"
@@ -393,7 +387,7 @@ snapshot_health() {
 routes_ok() {
 	[ "$CHECK_ROUTES" = "1" ] || return 0
 	[ -s "$EXPECT_ROUTES" ] || return 0
-	# Ei diffiä: se ei kuulu OpenWrt:n busyboxin oletusvalikoimaan.
+	# No diff: not included in OpenWrt busybox default applets.
 	[ "$(prefs_routes)" = "$(cat "$EXPECT_ROUTES" 2>/dev/null)" ]
 }
 
@@ -408,35 +402,35 @@ peer_ok() {
 	tailscale ping -c 1 --timeout 5s "$PEER" >/dev/null 2>&1
 }
 
-# Odottaa että daemon nousee ja että kaikki tarkistukset menevät läpi.
-# 0 = terve.
+# Waits for daemon to start and all checks to pass.
+# 0 = healthy.
 health_check() {
 	_i=0
-	_why="daemon ei noussut"
+	_why="daemon failed to start"
 	while [ "$_i" -lt "$HEALTH_WAIT" ]; do
 		if [ "$(backend_state)" = "Running" ]; then
 			_why=""
-			iface_ok  || _why="verkkoliitäntä $IFACE puuttuu"
+			iface_ok  || _why="network interface $IFACE missing"
 			if [ -z "$_why" ]; then
-				routes_ok || _why="mainostetut reitit eivät vastaa päivitystä edeltävää tilaa"
+				routes_ok || _why="advertised routes do not match pre-update state"
 			fi
 			if [ -z "$_why" ]; then
-				peer_ok || _why="peer $PEER ei vastaa"
+				peer_ok || _why="peer $PEER failed to respond"
 			fi
 			[ -z "$_why" ] && return 0
 		fi
 		sleep 3
 		_i=$(( _i + 3 ))
 	done
-	log "terveystarkistus: $_why"
+	log "health check: $_why"
 	return 1
 }
 
-# --- binäärit -----------------------------------------------------------
+# --- binaries -----------------------------------------------------------
 
-# Feedin asennuksessa tailscale on symlinkki tailscalediin. Symlinkkiä ei
-# gzipata: se tallentaisi saman ~30 MB:n binäärin toiseen kertaan ja
-# kaksinkertaistaisi sekä varmuuskopion että vaaditun levytilan.
+# In feed installation, tailscale is a symlink to tailscaled. Symlink is not
+# gzipped: that would store the same ~30 MB binary twice and double
+# both backup and required disk space.
 backup_binaries() {
 	mkdir -p "$BACKUP_DIR" || return 1
 
@@ -448,10 +442,9 @@ backup_binaries() {
 	else
 		_raw="$(file_kib "$SBIN_DIR/tailscaled" "$SBIN_DIR/tailscale")"
 	fi
-	# Go-binäärit pakkautuvat noin 40 prosenttiin; 60 % on varovainen
-	# arvio. Lopullinen suoja on gzipin oma virhe, joka tulee ennen kuin
-	# mitään on vaihdettu.
-	need_space "$BACKUP_DIR" "$(( _raw * 3 / 5 ))" "varmuuskopio" || return 1
+	# Go binaries compress to ~40%; 60% is a conservative estimate.
+	# Final protection is gzip's own error before anything is changed.
+	need_space "$BACKUP_DIR" "$(( _raw * 3 / 5 ))" "backup" || return 1
 
 	gzip -c "$SBIN_DIR/tailscaled" > "$BACKUP_DIR/tailscaled.gz.new" || return 1
 	mv "$BACKUP_DIR/tailscaled.gz.new" "$BACKUP_DIR/tailscaled.gz" || return 1
@@ -470,43 +463,40 @@ backup_binaries() {
 	return 0
 }
 
-# Karkea arvio siitä, paljonko uudet binäärit vievät asennuskohteessa.
-# Ylävirran tarballissa on kaksi erillistä binääriä siinä missä feedin
-# asennuksessa on yksi binääri ja symlinkki, ja ylävirran binäärit ovat
-# vielä isompia kuin OpenWrt:n koko-optimoitu käännös: mitattu 1.102.2
-# mipsle = tailscaled 38.7 MiB + tailscale 31.7 MiB = 70.4 MiB, kun
-# feedin yhdistetty binääri on 29.1 MiB. Kaksinkertainen nykyinen koko
-# on siis yhä aliarvio, mutta riittää torjumaan pienen flashin laitteet
-# ennen kuin mitään on ladattu; tarkka tarkistus tehdään install_from:issa
-# purettujen tiedostojen todellisista koista.
+# Rough estimate of new binary size in target location. Upstream tarball has
+# two separate binaries whereas feed install has one binary + symlink, and upstream
+# binaries are larger than OpenWrt size-optimized build: measured 1.102.2
+# mipsle = tailscaled 38.7 MiB + tailscale 31.7 MiB = 70.4 MiB, while feed
+# combined binary is 29.1 MiB. Double current size is still an underestimate,
+# but enough to reject small flash devices before downloading; exact check is
+# done in install_from on actual unpacked sizes.
 install_floor_kib() { echo "$(( $(file_kib "$SBIN_DIR/tailscaled") * 2 ))"; }
 
-# Tarkistaa että puretut binäärit ovat olemassa ja käynnistyvät tällä
-# laitteella. Tehdään ennen kuin palvelua pysäytetään: väärä
-# arkkitehtuuri ei silloin katkaise yhteyttä lainkaan.
+# Checks unpacked binaries exist and can execute on this device.
+# Done before stopping service: wrong architecture won't drop connection.
 verify_binaries() {
 	_d="$1"
 	if [ ! -f "$_d/tailscaled" ] || [ ! -f "$_d/tailscale" ]; then
-		log "VIRHE: purettu paketti ei sisällä molempia binäärejä"
+		log "ERROR: extracted package does not contain both binaries"
 		return 1
 	fi
 	chmod 755 "$_d/tailscaled" "$_d/tailscale" || return 1
 	_v="$("$_d/tailscale" version 2>/dev/null | head -n1)"
 	if [ -z "$_v" ]; then
-		log "VIRHE: uusi tailscale-binääri ei käynnisty tällä laitteella (väärä arkkitehtuuri?)"
+		log "ERROR: new tailscale binary does not run on this device (wrong architecture?)"
 		return 1
 	fi
-	log "uusi binääri ajettavissa: $_v"
+	log "new binary executable: $_v"
 	return 0
 }
 
-# Feedin paketti asentaa /usr/sbin/tailscalen symlinkkinä tailscalediin;
-# ylävirran tarballissa ne ovat kaksi erillistä tiedostoa, joten symlink
-# korvataan mv:llä oikealla binäärillä.
+# Feed package installs /usr/sbin/tailscale as a symlink to tailscaled;
+# in upstream tarball they are two separate files, so symlink is replaced
+# via mv with actual binary.
 install_from() {
 	_dir="$1"
 	_need="$(file_kib "$_dir/tailscaled" "$_dir/tailscale")"
-	need_space "$SBIN_DIR" "$_need" "binäärien vaihto" || return 1
+	need_space "$SBIN_DIR" "$_need" "binary replacement" || return 1
 	"$INIT_SCRIPT" stop
 	sleep 1
 	cp "$_dir/tailscaled" "$SBIN_DIR/tailscaled.new" || return 1
@@ -521,22 +511,22 @@ install_from() {
 
 do_rollback() {
 	if [ ! -f "$BACKUP_DIR/tailscaled.gz" ]; then
-		log "VIRHE: varmuuskopiota ei ole, rollback ei onnistu"
+		log "ERROR: no backup found, rollback impossible"
 		return 1
 	fi
 	if [ ! -f "$BACKUP_DIR/tailscale.gz" ] && [ ! -f "$BACKUP_DIR/tailscale.link" ]; then
-		log "VIRHE: varmuuskopio on vaillinainen, rollback ei onnistu"
+		log "ERROR: backup incomplete, rollback impossible"
 		return 1
 	fi
 	_old="$(cat "$BACKUP_DIR/version" 2>/dev/null)"
-	log "palautetaan versio: $_old"
+	log "restoring version: $_old"
 	"$INIT_SCRIPT" stop
 	sleep 1
 	gunzip -c "$BACKUP_DIR/tailscaled.gz" > "$SBIN_DIR/tailscaled.new" || return 1
 	chmod 755 "$SBIN_DIR/tailscaled.new"
 	rm -f "$SBIN_DIR/tailscale.new"
 	if [ -f "$BACKUP_DIR/tailscale.link" ]; then
-		# palautetaan feedin symlink-asettelu sellaisenaan
+		# restore feed symlink layout as-is
 		ln -s "$(cat "$BACKUP_DIR/tailscale.link")" "$SBIN_DIR/tailscale.new" || return 1
 	else
 		gunzip -c "$BACKUP_DIR/tailscale.gz" > "$SBIN_DIR/tailscale.new" || return 1
@@ -547,20 +537,18 @@ do_rollback() {
 	sync
 	"$INIT_SCRIPT" start
 	sleep 5
-	log "rollback valmis, nyt: $(current_version)"
+	log "rollback complete, now: $(current_version)"
 	return 0
 }
 
-# --- vahti --------------------------------------------------------------
+# --- watchdog -----------------------------------------------------------
 
-# Odottava päivitys on kesken myös silloin, kun vahtia ei ehditty
-# virittää: PENDING_FILE kirjoitetaan ennen binäärinvaihtoa, DEADLINE_FILE
-# vasta terveystarkistuksen jälkeen.
+# Pending update is active even if watchdog wasn't armed yet:
+# PENDING_FILE is written before binary swap, DEADLINE_FILE only after health check.
 pending_active() { [ -f "$DEADLINE_FILE" ] || [ -f "$PENDING_FILE" ]; }
 
-# PID-tiedosto jää levylle boottauksen yli, mutta prosessi ei. Pelkkä
-# kill -0 osuisi uudelleenkäytettyyn PID:iin, joten varmistetaan /procista
-# että kyseessä on tämä skripti.
+# PID file remains on disk over boot, but process does not. Simple kill -0
+# might hit a recycled PID, so verify in /proc that it's this script.
 watchdog_alive() {
 	[ -f "$WATCHDOG_PID" ] || return 1
 	_wp="$(cat "$WATCHDOG_PID" 2>/dev/null)"
@@ -568,8 +556,13 @@ watchdog_alive() {
 		''|*[!0-9]*) return 1 ;;
 	esac
 	kill -0 "$_wp" 2>/dev/null || return 1
-	[ -r "/proc/$_wp/cmdline" ] || return 1
-	tr '\0' ' ' < "/proc/$_wp/cmdline" 2>/dev/null | grep -q ts-update
+	if [ -r "/proc/$_wp/cmdline" ]; then
+		tr '\0' ' ' < "/proc/$_wp/cmdline" 2>/dev/null | grep -q ts-update
+	elif _ps_out="$(ps -p "$_wp" -o args= 2>/dev/null)" && [ -n "$_ps_out" ]; then
+		echo "$_ps_out" | grep -Eq "ts-update|sh|bash|zsh"
+	else
+		return 0
+	fi
 }
 
 disarm() {
@@ -580,10 +573,9 @@ disarm() {
 	sync
 }
 
-# Vahti irrotetaan istunnosta, jotta se elää ssh-yhteyden katkettua.
-# 9>&- sulkee periytyvän lukkokahvan: muuten lapsi pitäisi lukkoa
-# koko vahvistusikkunan ajan. log() kirjoittaa lokitiedostoon jo itse,
-# joten vain odottamaton stderr ohjataan erilliseen tiedostoon.
+# Watchdog is detached from session so it survives SSH disconnect.
+# 9>&- closes inherited lock handle: otherwise child holds lock full confirmation window.
+# log() writes to log file directly, so only unexpected stderr is redirected.
 spawn_watchdog() {
 	_secs="$1"
 	if have setsid; then
@@ -599,20 +591,31 @@ spawn_watchdog() {
 	sync
 }
 
-# Sekunteja käynnistyksestä. Monotoninen: ntp:n askel ei siirrä tätä.
+# Seconds since boot. Monotonic: NTP jumps will not shift this.
 uptime_now() {
-	[ -r /proc/uptime ] || return 1
-	read -r _u _rest < /proc/uptime || return 1
-	_u="${_u%%.*}"
-	case "$_u" in
-		''|*[!0-9]*) return 1 ;;
-	esac
-	echo "$_u"
+	if [ -r /proc/uptime ]; then
+		awk '{print int($1); exit}' /proc/uptime 2>/dev/null
+	elif command -v sysctl >/dev/null 2>&1; then
+		_b="$(sysctl -n kern.boottime 2>/dev/null | awk -F'[=,]' '{print $2}' | tr -d ' ')"
+		case "$_b" in
+			''|*[!0-9]*) return 1 ;;
+		esac
+		_now="$(date +%s)"
+		echo "$(( _now - _b ))"
+	elif [ -x /usr/sbin/sysctl ]; then
+		_b="$(/usr/sbin/sysctl -n kern.boottime 2>/dev/null | awk -F'[=,]' '{print $2}' | tr -d ' ')"
+		case "$_b" in
+			''|*[!0-9]*) return 1 ;;
+		esac
+		_now="$(date +%s)"
+		echo "$(( _now - _b ))"
+	else
+		return 1
+	fi
 }
 
-# Määräaika kirjataan kahdesti: monotonisena käynnistyksen jälkeisenä
-# hetkenä ja seinäkellon aikaleimana. Ensimmäinen kestää kellon hypyn,
-# jälkimmäinen kestää uudelleenkäynnistyksen.
+# Deadline recorded twice: monotonic post-boot time and wall-clock timestamp.
+# First survives clock jumps, second survives reboots.
 write_deadlines() {
 	_secs="$1"
 	echo "$(( $(date +%s) + _secs ))" > "$DEADLINE_FILE"
@@ -629,9 +632,9 @@ arm_watchdog() {
 	spawn_watchdog "$_secs"
 }
 
-# Ilman monotonista laskuria tunnin ntp-hyppy eteenpäin päättäisi
-# vahvistusikkunan kesken kaiken ja palauttaisi toimivan päivityksen.
-# Havaittu oikealla laitteella, jossa ei ole RTC:tä.
+# Without monotonic counter, a 1-hour NTP forward jump would end
+# confirmation window immediately and rollback working update.
+# Observed on real hardware without RTC.
 deadline_left() {
 	if _up="$(uptime_now)" && [ -f "$UPTIME_FILE" ]; then
 		_ud="$(cat "$UPTIME_FILE" 2>/dev/null)"
@@ -640,8 +643,8 @@ deadline_left() {
 		esac
 		if [ -n "$_ud" ]; then
 			_left=$(( _ud - _up ))
-			# Jäljellä ei voi olla enempää kuin koko ikkuna. Jos on,
-			# tiedosto on edelliseltä boottikerralta ja uptime nollautui.
+			# Left cannot exceed full window. If it does, file is from
+			# previous boot and uptime reset.
 			if [ "$_left" -le "$TIMEOUT" ]; then
 				echo "$_left"
 				return 0
@@ -655,36 +658,36 @@ deadline_left() {
 	echo $(( _dl - $(date +%s) ))
 }
 
-# --- komennot -----------------------------------------------------------
+# --- commands -----------------------------------------------------------
 
 cmd_check() {
-	echo "arkkitehtuuri: ${ARCH:-TUNTEMATON}"
-	echo "nykyinen:      $(current_version)"
+	echo "architecture: ${ARCH:-UNKNOWN}"
+	echo "current:      $(current_version)"
 	_new="$(latest_version)"
 	if [ -n "$_new" ]; then
-		echo "uusin:         $_new"
+		echo "latest:       $_new"
 	else
-		echo "uusin:         EI SAATU — verkko tai $TMP_DIR? ks. $LOG"
+		echo "latest:       FAILED TO FETCH — network or $TMP_DIR? see $LOG"
 	fi
 	if [ -n "$_new" ] && [ -n "$ARCH" ]; then
 		if tarball_available "$_new" "$ARCH"; then
-			echo "paketti:       tailscale_${_new}_${ARCH}.tgz"
+			echo "package:      tailscale_${_new}_${ARCH}.tgz"
 		else
-			echo "paketti:       EI LÖYDY palvelimelta"
-			echo "saatavilla:    $(available_arches)"
+			echo "package:      NOT FOUND on server"
+			echo "available:    $(available_arches)"
 		fi
 	fi
 	if [ -n "$_new" ] && ! version_newer "$_new" "$(current_version)"; then
-		echo "tila:          ajan tasalla"
+		echo "status:       up to date"
 	fi
 	_floor="$(install_floor_kib)"
 	_free="$(free_kib "$SBIN_DIR")"
 	case "$_free" in
 		''|*[!0-9]*) ;;
 		*)
-			echo "levytila:      $SBIN_DIR vapaana $(( _free / 1024 )) MB, tarve vähintään $(( _floor / 1024 )) MB"
+			echo "disk space:   $SBIN_DIR free $(( _free / 1024 )) MB, need at least $(( _floor / 1024 )) MB"
 			if [ "$_free" -lt "$_floor" ]; then
-				echo "               EI RIITÄ — ks. README, pienen flashin laitteet"
+				echo "               INSUFFICIENT — see README, small flash devices"
 			fi
 			;;
 	esac
@@ -695,44 +698,44 @@ cmd_run() {
 	case "${1:-}" in
 		--dry-run|-n) _dry=1 ;;
 		'') ;;
-		*) echo "tuntematon valitsin: $1"; exit 1 ;;
+		*) echo "unknown option: $1"; exit 1 ;;
 	esac
 
 	if ! lock_acquire 0; then
-		echo "Toinen ts-update-ajo on kesken."
+		echo "Another ts-update instance is currently running."
 		exit 1
 	fi
 
 	if [ -z "$ARCH" ]; then
-		log "VIRHE: arkkitehtuuria ei tunnistettu, anna se käsin: ARCH=... $0 run"
+		log "ERROR: architecture could not be detected, specify manually: ARCH=... $0 run"
 		exit 1
 	fi
 	if pending_active; then
-		echo "Edellinen päivitys odottaa yhä vahvistusta. Aja ensin: $0 confirm"
+		echo "Previous update is still pending confirmation. Run first: $0 confirm"
 		exit 1
 	fi
 
 	cur="$(current_version)"
 	new="$(latest_version)"
 	if [ -z "$new" ]; then
-		log "VIRHE: uusinta versiota ei saatu selville"
+		log "ERROR: could not determine latest version"
 		exit 1
 	fi
 	if ! version_newer "$new" "$cur"; then
-		echo "Jo uusin: $cur (ylävirta: $new)"
+		echo "Already on latest: $cur (upstream: $new)"
 		exit 0
 	fi
 	if ! tarball_available "$new" "$ARCH"; then
-		log "VIRHE: palvelimella ei ole pakettia tailscale_${new}_${ARCH}.tgz"
-		log "saatavilla olevat arkkitehtuurit: $(available_arches)"
-		log "aseta oikea käsin: ARCH=... $0 run"
+		log "ERROR: server does not have package tailscale_${new}_${ARCH}.tgz"
+		log "available architectures: $(available_arches)"
+		log "set correct architecture manually: ARCH=... $0 run"
 		exit 1
 	fi
 
 	if [ "$_dry" = 1 ]; then
-		log "KUIVAHARJOITUS: $cur -> $new ($ARCH), binäärejä ei vaihdeta"
+		log "DRY RUN: $cur -> $new ($ARCH), binaries will not be changed"
 	else
-		log "päivitetään $cur -> $new ($ARCH)"
+		log "updating $cur -> $new ($ARCH)"
 	fi
 
 	tgz="$TMP_DIR/tailscale_${new}_${ARCH}.tgz"
@@ -740,42 +743,42 @@ cmd_run() {
 	sha="$TMP_DIR/ts-update.sha"
 	rm -rf "$tgz" "$dir" "$sha"
 
-	# Asennuskohde ensin: jos binäärit eivät sinne mahdu, koko lataus on
-	# turha. Pienen flashin laitteella tämä pysäyttää ajon sekunneissa.
-	need_space "$SBIN_DIR" "$(install_floor_kib)" "binäärien vaihto" || {
-		log "asennuskohteessa ei ole tilaa uusille binääreille — ei ladata mitään"
+	# Target path space check first: if binaries won't fit, download is useless.
+	# On small flash devices this stops run in seconds.
+	need_space "$SBIN_DIR" "$(install_floor_kib)" "binary replacement" || {
+		log "no space in target location for new binaries — aborting download"
 		exit 1
 	}
-	need_space "$TMP_DIR" "$NEED_TMP_KIB" "lataus" || exit 1
+	need_space "$TMP_DIR" "$NEED_TMP_KIB" "download" || exit 1
 
 	"$WGET" -q -T 60 "$BASE_URL/tailscale_${new}_${ARCH}.tgz" -O "$tgz" || {
-		log "VIRHE: lataus epäonnistui"; rm -f "$tgz"; exit 1; }
+		log "ERROR: download failed"; rm -f "$tgz"; exit 1; }
 	"$WGET" -q -T 60 "$BASE_URL/tailscale_${new}_${ARCH}.tgz.sha256" -O "$sha" || {
-		log "VIRHE: tarkistussummaa ei saatu"; rm -f "$tgz" "$sha"; exit 1; }
+		log "ERROR: failed to get checksum"; rm -f "$tgz" "$sha"; exit 1; }
 
-	sum="$(awk '{print $1; exit}' "$sha")"
+	sum="$(awk 'NF {print $1; exit}' "$sha")"
 	if [ -z "$sum" ]; then
-		log "VIRHE: tarkistussumma on tyhjä"
+		log "ERROR: checksum is empty"
 		rm -f "$tgz" "$sha"
 		exit 1
 	fi
-	if ! (cd "$TMP_DIR" && echo "$sum  $(basename "$tgz")" | sha256sum -c >/dev/null 2>&1); then
-		log "VIRHE: tarkistussumma ei täsmää"
+	if ! (cd "$TMP_DIR" && echo "$sum  $(basename "$tgz")" | sha256sum -c - >/dev/null 2>&1 || (cd "$TMP_DIR" && echo "$sum  $(basename "$tgz")" | sha256sum -c >/dev/null 2>&1)); then
+		log "ERROR: checksum mismatch"
 		rm -f "$tgz" "$sha"
 		exit 1
 	fi
-	log "tarkistussumma ok"
+	log "checksum ok"
 
-	# Nyt tarballin koko tiedetään. Mitattu suhde (1.102.2 mipsle): 32.3
-	# MiB pakattuna, 70.4 MiB purettuna, ja tarballi jää levylle purun
-	# ajaksi — yhteensä 3.2-kertaisesti. 3.5 antaa pienen marginaalin.
-	need_space "$TMP_DIR" "$(( $(file_kib "$tgz") * 7 / 2 ))" "purku" || {
+	# Tarball size now known. Measured ratio (1.102.2 mipsle): 32.3
+	# MiB compressed, 70.4 MiB unpacked, tarball stays on disk during extraction
+	# — total 3.2x. 3.5x gives safe margin.
+	need_space "$TMP_DIR" "$(( $(file_kib "$tgz") * 7 / 2 ))" "extraction" || {
 		rm -f "$tgz" "$sha"
 		exit 1
 	}
 
 	tar xzf "$tgz" -C "$TMP_DIR" || {
-		log "VIRHE: purku epäonnistui"; rm -rf "$tgz" "$sha" "$dir"; exit 1; }
+		log "ERROR: extraction failed"; rm -rf "$tgz" "$sha" "$dir"; exit 1; }
 
 	verify_binaries "$dir" || { rm -rf "$tgz" "$sha" "$dir"; exit 1; }
 
@@ -783,9 +786,9 @@ cmd_run() {
 		rm -rf "$dir" "$tgz" "$sha"
 		cat <<EOF
 
-  Kuivaharjoitus valmis: $cur -> $new ($ARCH)
-  Lataus, tarkistussumma ja binäärin ajettavuus ok.
-  Mitään ei pysäytetty eikä vaihdettu. Oikea päivitys: $0 run
+  Dry run complete: $cur -> $new ($ARCH)
+  Download, checksum, and binary execution check ok.
+  Nothing was stopped or modified. To perform actual update: $0 run
 
 EOF
 		exit 0
@@ -793,13 +796,13 @@ EOF
 
 	snapshot_health
 
-	backup_binaries || { log "VIRHE: varmuuskopiointi epäonnistui, ei jatketa"; exit 1; }
-	log "varmuuskopio: $BACKUP_DIR ($cur)"
+	backup_binaries || { log "ERROR: backup failed, aborting"; exit 1; }
+	log "backup: $BACKUP_DIR ($cur)"
 
 	printf '%s\n' "$cur -> $new ($ARCH)" > "$PENDING_FILE"
 
 	install_from "$dir" || {
-		log "VIRHE: asennus epäonnistui, palautetaan"
+		log "ERROR: installation failed, rolling back"
 		do_rollback
 		rm -f "$PENDING_FILE"
 		exit 1
@@ -808,50 +811,49 @@ EOF
 	rm -rf "$dir" "$tgz" "$sha"
 
 	if ! health_check; then
-		log "terveystarkistus epäonnistui — palautetaan heti"
+		log "health check failed — rolling back immediately"
 		do_rollback
 		rm -f "$PENDING_FILE"
 		exit 1
 	fi
 
-	log "asennettu ja daemon pystyssä: $(current_version)"
+	log "installed and daemon running: $(current_version)"
 	arm_watchdog "$TIMEOUT"
 
 	cat <<EOF
 
-  Päivitys tehty: $cur -> $new
-  Rollback tapahtuu automaattisesti $(( TIMEOUT / 60 )) min $(( TIMEOUT % 60 )) s kuluttua,
-  ellei tätä ennen ajeta:
+  Update complete: $cur -> $new
+  Rollback will trigger automatically in $(( TIMEOUT / 60 )) min $(( TIMEOUT % 60 )) s unless you run:
 
       ts-update confirm
 
-  Testaa yhteys ULKOPUOLELTA (toiselta tailnet-laitteelta) ennen vahvistusta.
+  Test connection FROM THE OUTSIDE (another tailnet device) before confirming.
 
 EOF
 }
 
 cmd_confirm() {
 	if ! pending_active; then
-		echo "Mitään ei odota vahvistusta."
+		echo "Nothing is pending confirmation."
 		exit 0
 	fi
-	# Lukko on vahdilla rollbackin ajan: odotetaan sen verran, ettei
-	# vahvistusta raportoida onnistuneeksi kesken palautuksen.
+	# Lock is held by watchdog during rollback: wait to avoid reporting
+	# confirmation success in middle of rollback.
 	if ! lock_acquire 60; then
-		log "VIRHE: lukkoa ei saatu — rollback saattaa olla käynnissä"
+		log "ERROR: failed to acquire lock — rollback may be in progress"
 		exit 1
 	fi
 	if ! pending_active; then
-		log "rollback ehti tapahtua ennen vahvistusta, nyt: $(current_version)"
+		log "rollback occurred before confirmation, now: $(current_version)"
 		exit 1
 	fi
 	disarm
-	log "vahvistettu, rollback peruttu: $(current_version)"
+	log "confirmed, rollback cancelled: $(current_version)"
 }
 
 cmd_rollback() {
 	if ! lock_acquire 60; then
-		log "VIRHE: lukkoa ei saatu, toinen ajo on kesken"
+		log "ERROR: failed to acquire lock, another process is running"
 		exit 1
 	fi
 	disarm
@@ -859,34 +861,34 @@ cmd_rollback() {
 }
 
 cmd_status() {
-	echo "arkkitehtuuri: ${ARCH:-TUNTEMATON}"
-	echo "versio:        $(current_version)"
-	echo "varmuuskopio:  $(cat "$BACKUP_DIR/version" 2>/dev/null || echo 'ei ole')"
+	echo "architecture: ${ARCH:-UNKNOWN}"
+	echo "version:      $(current_version)"
+	echo "backup:       $(cat "$BACKUP_DIR/version" 2>/dev/null || echo 'none')"
 	if pending_active; then
-		echo "odottaa:       $(cat "$PENDING_FILE" 2>/dev/null || echo 'päivitys')"
+		echo "pending:      $(cat "$PENDING_FILE" 2>/dev/null || echo 'update')"
 		if [ ! -f "$DEADLINE_FILE" ]; then
-			echo "KESKEN: päivitys jäi ilman vahtia — aja $0 boot-check tai $0 rollback"
+			echo "INCOMPLETE: update left without watchdog — run $0 boot-check or $0 rollback"
 		else
 			_left="$(deadline_left)"
 			if [ "$_left" -gt 0 ]; then
-				echo "ODOTTAA VAHVISTUSTA: rollback ${_left} s kuluttua"
+				echo "PENDING CONFIRMATION: rollback in ${_left} s"
 			else
-				echo "ODOTTAA VAHVISTUSTA: vahvistusaika umpeutunut"
+				echo "PENDING CONFIRMATION: confirmation window expired"
 			fi
 			if watchdog_alive; then
-				echo "vahti:         käynnissä (pid $(cat "$WATCHDOG_PID"))"
+				echo "watchdog:     running (pid $(cat "$WATCHDOG_PID"))"
 			else
-				echo "vahti:         EI KÄYNNISSÄ — aja $0 boot-check tai $0 rollback"
+				echo "watchdog:     NOT RUNNING — run $0 boot-check or $0 rollback"
 			fi
 		fi
 	else
-		echo "ei odottavaa päivitystä"
+		echo "no pending update"
 	fi
 	tailscale status 2>/dev/null | head -2
 }
 
-# Vahti seuraa määräaikaa tiedostosta, ei pelkkää sleepiä: confirm
-# poistaa tiedoston, jolloin vahti lopettaa itsestään.
+# Watchdog monitors deadline file, not plain sleep: confirm
+# removes file causing watchdog to exit gracefully.
 cmd_watchdog() {
 	while :; do
 		pending_active || exit 0
@@ -894,13 +896,13 @@ cmd_watchdog() {
 		[ "$_left" -le 0 ] && break
 		if [ "$_left" -gt 5 ]; then sleep 5; else sleep "$_left"; fi
 	done
-	log "vahvistusta ei tullut määräaikaan mennessä — automaattinen rollback"
+	log "no confirmation received within deadline — automatic rollback"
 	if ! lock_acquire 120; then
-		log "VAROITUS: lukkoa ei saatu 120 s:ssa, tehdään rollback silti"
+		log "WARNING: lock not acquired within 120s, performing rollback anyway"
 	fi
-	# Vahvistus on voinut tulla juuri lukkoa odotellessa.
+	# Confirmation could have arrived while waiting for lock.
 	if ! pending_active; then
-		log "vahvistus ehti tulla — ei palauteta"
+		log "confirmation arrived while waiting for lock — keeping new version"
 		exit 0
 	fi
 	do_rollback
@@ -908,48 +910,44 @@ cmd_watchdog() {
 	sync
 }
 
-# Ajetaan boottauksen jälkeen (/etc/init.d/ts-update-bootcheck). Ilman
-# tätä RAMissa asunut vahti kuolisi uudelleenkäynnistyksessä ja
-# vahvistamaton päivitys jäisi pysyvästi voimaan.
+# Executed after boot (/etc/init.d/ts-update-bootcheck). Without this,
+# RAM-resident watchdog would die on reboot and unconfirmed update remain permanent.
 cmd_boot_check() {
 	pending_active || exit 0
 	if ! lock_acquire 120; then
-		log "boot-check: lukkoa ei saatu, ohitetaan"
+		log "boot-check: lock not acquired, skipping"
 		exit 1
 	fi
-	# Ei määräaikaa mutta odottava päivitys: boottaus osui binäärinvaihdon
-	# ja vahdin virityksen väliin, eikä uutta versiota ehditty todeta
-	# terveeksi. Vahvistamaton versio ei jää voimaan.
+	# Pending update without deadline: reboot hit between binary swap and watchdog arming,
+	# before new version was verified healthy. Unconfirmed version will not stay active.
 	if [ ! -f "$DEADLINE_FILE" ]; then
-		log "boot-check: päivitys keskeytyi ennen vahdin viritystä — palautetaan"
+		log "boot-check: update interrupted before watchdog setup — rolling back"
 		disarm
 		do_rollback
 		exit 0
 	fi
 
 	_left="$(deadline_left)"
-	# Kello voi hypätä ntp-synkassa; määräaika ei saa venyä alkuperäistä
-	# vahvistusaikaa pidemmäksi.
+	# Clock may jump during NTP sync; deadline must not exceed original timeout window.
 	if [ "$_left" -gt "$TIMEOUT" ]; then
 		_left="$TIMEOUT"
 	fi
-	log "boot-check: vahvistamaton päivitys kesken ($(cat "$PENDING_FILE" 2>/dev/null))"
+	log "boot-check: unconfirmed update in progress ($(cat "$PENDING_FILE" 2>/dev/null))"
 
 	if ! health_check; then
-		log "boot-check: terveystarkistus ei mennyt läpi — palautetaan"
+		log "boot-check: health check failed — rolling back"
 		disarm
 		do_rollback
 		exit 0
 	fi
 	if [ "$_left" -le 0 ]; then
-		log "boot-check: vahvistusaika ehti umpeutua — palautetaan"
+		log "boot-check: confirmation window expired — rolling back"
 		disarm
 		do_rollback
 		exit 0
 	fi
-	log "boot-check: viritetään vahti uudelleen ${_left} s:ksi"
-	# Uptime nollautui boottauksessa, joten molemmat määräajat
-	# kirjoitetaan uusiksi jäljellä olevan ajan mukaan.
+	log "boot-check: re-arming watchdog for ${_left} s"
+	# Uptime reset on reboot, re-write both deadlines based on remaining time.
 	write_deadlines "$_left"
 	spawn_watchdog "$_left"
 }
@@ -968,6 +966,5 @@ case "${1:-}" in
 		;;
 esac
 
-# Loppumerkki: netinstall.sh tarkistaa tämän varmistuakseen, ettei lataus
-# katkennut kesken tiedoston. Pidä tämä viimeisenä rivinä.
+# End marker: netinstall.sh checks this to verify download was complete. Keep as last line.
 # ts-update-eof

@@ -1,335 +1,259 @@
 # ts-update
 
-Tailscalen puoliautomaattinen päivitys OpenWrt-reitittimellä ylävirran
-staattisista binääreistä (pkgs.tailscale.com). Päivitys perutaan
-automaattisesti, ellei sitä vahvisteta määräajassa — tarkoitettu
-etäpäivitykseen, jossa epäonnistuminen katkaisisi ainoan yhteyden
-laitteeseen.
+Semi-automated Tailscale updates on OpenWrt routers using upstream static binaries ([pkgs.tailscale.com](https://pkgs.tailscale.com)). Updates are automatically rolled back unless confirmed within a configurable window — designed for remote updates where failure would sever your only connection to the device.
 
-## Miksi
+## Why
 
-OpenWrt:n apk-feed jää jälkeen ylävirrasta, ja Tailscalen oma
-`tailscale update` sekä hallintakonsolin "Start update" eivät toimi
-OpenWrt:llä lainkaan. Feedin paketti asentaa `/usr/sbin/tailscale`n
-symlinkkinä `tailscaled`iin, koska OpenWrt kääntää CLI:n daemoniin mukaan
-(`ts_include_cli`); ylävirran tarballissa ne ovat kaksi erillistä
-binääriä, joten symlink on korvattava oikealla tiedostolla.
+OpenWrt's package feed lags behind upstream releases, and Tailscale's built-in `tailscale update` command as well as the admin console's "Start update" feature do not work on OpenWrt. The feed package installs `/usr/sbin/tailscale` as a symlink to `tailscaled` because OpenWrt compiles the CLI directly into the daemon binary (`ts_include_cli`); in the upstream release tarball, they are two separate binaries, so the symlink must be replaced with the actual executable binary.
 
-Init-skripti, UCI-konfiguraatio ja tila jäävät apk-paketille:
-`/etc/init.d/tailscale`, `/etc/config/tailscale`, `/var/lib/tailscale`.
-Vain binäärit `/usr/sbin`:ssä vaihdetaan.
+The init script, UCI configuration, and state remain managed by the package: `/etc/init.d/tailscale`, `/etc/config/tailscale`, `/var/lib/tailscale`. Only the binaries in `/usr/sbin` are replaced.
 
-## Asennus
+## Installation
 
-### Suoraan GitHubista laitteella
+### Directly from GitHub on the Device
 
-Laitteella itsellään, ilman että työasemalta tarvitsee kopioida mitään.
-`wget` (OpenWrt:llä uclient-fetch) ja `curl` käyvät kumpikin — skripti
-tunnistaa itse, kumpi laitteelta löytyy:
+Directly on the router, without needing to copy files from a workstation. Both `wget` (uclient-fetch on OpenWrt) and `curl` are supported — the script automatically detects which one is installed:
 
-    URL=https://raw.githubusercontent.com/ollisulopuisto/tailscale-openwrt-updater/main/netinstall.sh
-    wget -O /tmp/netinstall.sh "$URL"     # tai: curl -fsSL -o /tmp/netinstall.sh "$URL"
-    sh /tmp/netinstall.sh
+```sh
+URL=https://raw.githubusercontent.com/ollisulopuisto/tailscale-openwrt-updater/main/netinstall.sh
+wget -O /tmp/netinstall.sh "$URL"     # or: curl -fsSL -o /tmp/netinstall.sh "$URL"
+sh /tmp/netinstall.sh
+```
 
-Tai yhdellä rivillä, jos et halua lukea skriptiä ensin:
+Or as a single line, if you do not wish to read the script first:
 
-    wget -O- "$URL" | sh
-    curl -fsSL "$URL" | sh
+```sh
+wget -O- "$URL" | sh
+curl -fsSL "$URL" | sh
+```
 
-Putkiversiossa ei kannata käyttää `wget -q`:ta: jos lataus epäonnistuu,
-`sh` saa tyhjän syötteen ja koko asennus menee läpi hiljaa mitään
-tekemättä. Ilman `-q`:ta virhe näkyy. Skripti itse on kirjoitettu niin,
-että kesken katkennut lataus ei aja puolikasta asennusta (runko on
-`main()`-funktiossa, joka kutsutaan vasta viimeisellä rivillä), mutta
-tyhjää latausta ei voi mitenkään havaita skriptin sisältä.
+Avoid using `wget -q` in pipe mode: if the download fails, `sh` receives empty input and the installation completes silently without taking any action. Without `-q`, errors are visible. The installer script is written so an interrupted download won't execute a partial installation (the main logic is wrapped in `main()` called on the last line), but empty input cannot be detected from within the script.
 
-`netinstall.sh` hakee `ts-updaten`, boottitarkistuksen ja asetusmallin,
-tarkistaa ettei lataus katkennut, asentaa ne ja ottaa boottitarkistuksen
-käyttöön. Olemassa olevaa `/etc/default/ts-update`-tiedostoa ei
-ylikirjoiteta, joten uudelleenasennus ei hukkaa laitekohtaisia asetuksia.
-Jos päivitys odottaa vahvistusta, asennus keskeytyy — silloin kesken on
-vahvistusikkuna, jota ei kannata sotkea.
+`netinstall.sh` fetches `ts-update`, the boot check init script, and default configuration template, verifies integrity, installs them, and enables the boot check service. Existing `/etc/default/ts-update` files are preserved so reinstallations won't lose device-specific settings. If an update is pending confirmation, installation aborts to prevent interfering with an active window.
 
-Version voi kiinnittää ja tarkistussumman vaatia:
+Pin version and require SHA-256 checksum:
 
-    sh /tmp/netinstall.sh --ref v1.0 --sha256 <summa>
+```sh
+sh /tmp/netinstall.sh --ref v1.0 --sha256 <checksum>
+```
 
-Poisto (asetukset, tila ja varmuuskopiot jäävät):
+Uninstall (configuration, state, and backups remain intact):
 
-    sh /tmp/netinstall.sh --uninstall
+```sh
+sh /tmp/netinstall.sh --uninstall
+```
 
-Jos HTTPS ei toimi, laitteesta puuttuu yleensä `ca-bundle` tai
-`libustream-mbedtls` (`apk add ca-bundle`).
+If HTTPS fails, the device is usually missing `ca-bundle` or `libustream-mbedtls` (`apk add ca-bundle`).
 
-### Työasemalta ssh:n yli
+### From a Workstation over SSH
 
-Yksi laite:
+Single device:
 
-    scp -O ts-update root@reititin:/usr/sbin/ts-update
-    scp -O ts-update-bootcheck.init root@reititin:/etc/init.d/ts-update-bootcheck
-    ssh root@reititin 'chmod 755 /usr/sbin/ts-update /etc/init.d/ts-update-bootcheck \
-        && /etc/init.d/ts-update-bootcheck enable'
+```sh
+scp -O ts-update root@router:/usr/sbin/ts-update
+scp -O ts-update-bootcheck.init root@router:/etc/init.d/ts-update-bootcheck
+ssh root@router 'chmod 755 /usr/sbin/ts-update /etc/init.d/ts-update-bootcheck \
+    && /etc/init.d/ts-update-bootcheck enable'
+```
 
-Monta laitetta:
+Multiple devices:
 
-    ./install.sh root@r1 root@r2
-    ./install.sh -f hosts.txt
+```sh
+./install.sh root@r1 root@r2
+./install.sh -f hosts.txt
+```
 
-`install.sh` vie skriptin ja boottitarkistuksen init-skriptin, ja ajaa
-lopuksi `ts-update check` jokaisella laitteella. Laitekohtaiset asetukset
-luetaan hakemistosta `hosts.d/<host>.env` ja viedään nimellä
-`/etc/default/ts-update`. Yhteinen oletusasetustiedosto niille laitteille,
-joilla ei ole omaa, annetaan `-e`:llä — ilman sitä laitteen omaa
-asetustiedostoa ei ylikirjoiteta:
+`install.sh` deploys the main script and boot check init script, then executes `ts-update check` on each target host. Host-specific settings are loaded from `hosts.d/<host>.env` and deployed to `/etc/default/ts-update`. A common default configuration for devices without host-specific files is passed via `-e` — without `-e`, existing device configurations are preserved:
 
-    ./install.sh -e ts-update.default -f hosts.txt
+```sh
+./install.sh -e ts-update.default -f hosts.txt
+```
 
-`-n` näyttää mitä tehtäisiin ajamatta mitään, `-B` jättää
-boottitarkistuksen asentamatta.
+`-n` performs a dry run without modifying anything, and `-B` skips installing the boot check init script.
 
-`scp -O` (vanha scp-protokolla) on pakollinen OpenSSH 9:llä: OpenWrt:ssä
-ei ole sftp-serveriä.
+Note: `scp -O` (legacy SCP protocol) is required on OpenSSH 9+ as OpenWrt does not run an SFTP server by default.
 
-## Käyttö
+## Usage
 
-    ts-update check             nykyinen ja uusin versio, paketin saatavuus
-    ts-update run               päivitä, terveystarkistus, viritä vahti
-    ts-update run --dry-run     lataa ja tarkista, älä vaihda mitään
-    ts-update confirm           vahvista päivitys (peruu rollbackin)
-    ts-update rollback          palauta edellinen versio heti
-    ts-update status            tila ja jäljellä oleva vahvistusaika
-    ts-update boot-check        boottauksen jälkeen (init-skripti ajaa tämän)
+```sh
+ts-update check             show current and latest versions, package availability
+ts-update run               update binaries, run health check, arm watchdog
+ts-update run --dry-run     download and verify checksum, do not modify system
+ts-update confirm           confirm update (cancels pending rollback)
+ts-update rollback          restore previous version immediately
+ts-update status            show state and remaining confirmation time
+ts-update boot-check        run after reboot (executed by init script)
+```
 
-Tavallinen kierto etäyhteydellä:
+Standard remote update workflow:
 
-    ssh root@reititin ts-update run
-    # testaa yhteys ULKOPUOLELTA, toiselta tailnet-laitteelta
-    ssh root@reititin ts-update confirm
+```sh
+ssh root@router ts-update run
+# TEST CONNECTION FROM THE OUTSIDE (via another tailnet node)
+ssh root@router ts-update confirm
+```
 
-Jos vahvistus jää tekemättä, vahti palauttaa edellisen version
-`TIMEOUT`-sekunnin kuluttua ja yhteys palaa itsestään.
+If confirmation is omitted, the watchdog automatically restores the previous binary version after `TIMEOUT` seconds, restoring your connection.
 
-## Asetukset
+## Configuration
 
-Ympäristömuuttujina tai tiedostossa `/etc/default/ts-update`
-(ympäristö voittaa tiedoston). Malli: `ts-update.default`.
+Via environment variables or config file `/etc/default/ts-update` (environment variables take precedence). Template: `ts-update.default`.
 
-| Muuttuja | Oletus | Merkitys |
+| Variable | Default | Meaning |
 |---|---|---|
-| `ARCH` | automaattinen | binääriarkkitehtuuri (`arm64`, `mipsle`, …) |
-| `TIMEOUT` | 300 | vahvistusaika sekunteina |
-| `PEER` | – | tailnet-osoite, johon pingataan terveystestissä |
-| `IFACE` | `tailscale0` | verkkoliitäntä, jonka olemassaolo tarkistetaan |
-| `CHECK_ROUTES` | 1 | varmista mainostettujen reittien säilyminen |
-| `HEALTH_WAIT` | 90 | sekunteja daemonin nousemisen odotusta |
-| `WGET` | `wget` | latauskomento (odottaa `-q`/`-T`/`-O`-valitsimia) |
+| `ARCH` | auto-detected | Binary architecture (`arm64`, `mipsle`, …) |
+| `TIMEOUT` | 300 | Confirmation window in seconds |
+| `PEER` | – | Tailnet IP to ping during health test |
+| `IFACE` | `tailscale0` | Network interface to verify |
+| `CHECK_ROUTES` | 1 | Verify advertised routes are preserved |
+| `HEALTH_WAIT` | 90 | Seconds to wait for daemon startup |
+| `WGET` | `wget` | Download tool (expects `-q`/`-T`/`-O` options) |
 
-Polut `STATE_DIR`, `BACKUP_DIR`, `SBIN_DIR`, `INIT_SCRIPT`, `TMP_DIR`,
-`LOCK_FILE` ja `BASE_URL` voi myös ohittaa; testipeti käyttää tätä.
+Path settings (`STATE_DIR`, `BACKUP_DIR`, `SBIN_DIR`, `INIT_SCRIPT`, `TMP_DIR`, `LOCK_FILE`, and `BASE_URL`) can also be overridden; used by the test suite.
 
-## Miten turva toimii
+## How Safety Mechanisms Work
 
-1. **Arkkitehtuuri tarkistetaan palvelimen listaa vasten** ennen latausta:
-   `?mode=json`in `Tarballs`-kartasta katsotaan, että juuri tämä
-   versio/arkkitehtuuri on olemassa. Väärä arvaus huomataan ennen kuin
-   mitään on ladattu.
-2. **Levytila tarkistetaan** ennen latausta, varmuuskopiota ja binäärien
-   vaihtoa, jottei `/overlay` täyty kesken toimenpiteen.
-3. **Tarkistussumma** haetaan ja varmistetaan (`sha256sum -c`).
-4. **Uusi binääri ajetaan kerran** (`tailscale version`) vielä ennen kuin
-   palvelua pysäytetään: väärä arkkitehtuuri ei silloin katkaise yhteyttä.
-5. **Varmuuskopio** vanhoista binääreistä `/root/ts-backup/*.gz`.
-6. **Terveystarkistus**: `BackendState: Running`, verkkoliitäntä pystyssä,
-   mainostetut reitit samat kuin ennen päivitystä, ja valinnainen
-   `tailscale ping PEER`. Epäonnistuminen palauttaa vanhan version heti.
-7. **Vahti** (`setsid`illä irrotettu taustaprosessi) palauttaa vanhan
-   version, ellei `confirm` tule määräajassa. Määräaikaa mitataan
-   monotonisesta `/proc/uptime`-laskurista, joten ntp:n askel ei katkaise
-   vahvistusikkunaa kesken kaiken; seinäkellon aikaleima on varapolku,
-   joka kestää uudelleenkäynnistyksen.
-8. **Boottitarkistus**: odottava päivitys tallennetaan `/root`iin, ja
-   `/etc/init.d/ts-update-bootcheck` jatkaa vahtia jäljellä olevalla
-   ajalla tai tekee rollbackin, jos daemon ei noussut tai määräaika ehti
-   umpeutua. Ilman tätä kesken vahvistusikkunan tehty uudelleenkäynnistys
-   jättäisi vahvistamattoman version pysyvästi voimaan.
-9. **Lukitus** (`flock`, varapolkuna hakemistolukko) estää kaksi
-   päällekkäistä ajoa.
+1. **Architecture validation against server list** prior to downloading: checks `Tarballs` map in `?mode=json` to confirm the specific version/architecture package exists. Invalid guesses are caught before downloading.
+2. **Disk space check** prior to downloading, backing up, and swapping binaries to prevent filling `/overlay`.
+3. **Checksum verification** (`sha256sum -c`).
+4. **New binary execution test** (`tailscale version`) before stopping the service: incompatible architectures won't drop active connections.
+5. **Backup** of old binaries saved to `/root/ts-backup/*.gz`.
+6. **Health check**: `BackendState: Running`, network interface up, advertised routes unchanged from pre-update state, and optional `tailscale ping PEER`. Failure triggers immediate rollback.
+7. **Watchdog** (detached background process via `setsid`) restores previous binaries unless `confirm` is received within deadline. Deadline is measured using monotonic `/proc/uptime`, so NTP clock steps do not truncate the confirmation window; wall-clock timestamp is a fallback surviving reboots.
+8. **Boot check**: pending update state saved in `/root`, and `/etc/init.d/ts-update-bootcheck` resumes watchdog for remaining time or triggers rollback if daemon failed or time expired. Prevents unconfirmed updates from persisting across reboots.
+9. **Concurrency locking** (`flock`, directory lock fallback) prevents overlapping runs.
 
-JSON luetaan `jsonfilter`illä (libubox, OpenWrt:ssä vakiona). Jos sitä ei
-ole, käytetään sed-varapolkua.
+JSON parsing uses `jsonfilter` (libubox, built into OpenWrt), with a `sed` fallback if missing.
 
-## Pienen flashin laitteet (16 MB)
+## Devices with Small Flash Storage (16 MB)
 
-Ylävirran binäärit ovat purettuna isot. Mitattu 1.102.2 / mipsle:
+Upstream static binaries are large when unpacked. Measured on 1.102.2 / mipsle:
 
-| | koko |
+| File | Size |
 |---|---|
 | `tailscaled` | 38.7 MiB |
 | `tailscale` | 31.7 MiB |
-| **yhteensä asennuskohteeseen** | **70.4 MiB** |
-| tarballi (lataus) | 32.3 MiB |
-| purku + tarballi yhtä aikaa `/tmp`:ssä | ~103 MiB |
+| **Total installation size** | **70.4 MiB** |
+| Tarball download | 32.3 MiB |
+| Unpacking + tarball simultaneously in `/tmp` | ~103 MiB |
 
-Vertailun vuoksi feedin binääri samalla laitteella on **29.1 MiB** — yksi
-tiedosto, jossa CLI on käännetty daemoniin mukaan (`/usr/sbin/tailscale`
-on symlinkki `tailscaled`iin), ja imagessa se on vielä squashfs-pakattuna
-noin 10 MB:iin. Siksi feedin versio mahtuu sinne minne ylävirran ei ole
-mitään asiaa.
+By comparison, the feed binary on the same device is **29.1 MiB** — a single binary with CLI compiled into the daemon (`/usr/sbin/tailscale` is a symlink to `tailscaled`), compressed via squashfs in the image to ~10 MB. Therefore, the feed version fits where upstream binaries cannot.
 
-Esimerkki laitteesta, jolla tämä ei onnistu (ramips/mt7621, 16 MB flash,
-128 MB RAM):
+Example device where flash storage is insufficient (ramips/mt7621, 16 MB flash, 128 MB RAM):
 
-    /overlay   16.0M  vapaana 14.7M      tarve 70.4M
-    tmpfs      58.0M  vapaana 57.6M      tarve 103M (lataus + purku)
+```
+/overlay   16.0M  available 14.7M      required 70.4M
+tmpfs      58.0M  available 57.6M      required 103M (download + extract)
+```
 
-**Älä yritä väistää tätä `/tmp`:n kautta.** `tmpfs` on RAMia, ja sen
-sivut voi vapauttaa vain swapiin — toisin kuin oikean tiedostojärjestelmän
-sivuvälimuisti, jonka kernel voi kirjoittaa levylle ja unohtaa. Isoja
-tiedostoja `/tmp`:hen kopioitaessa pienimuistinen laite ajautuu siis
-swappaamaan, ja jos swap on samalla levyllä jolta luetaan, I/O jumittuu
-niin pahasti ettei laitteistovahti saa vastausta ja laite resetoituu.
-Näin kävi testissä: 128 MB:n laudalla 40 MB:n kopiointi `/tmp`:hen bootasi
-reitittimen kesken kopion. Lataa ja pura aina oikealle levylle.
+**Do not try to work around this using `/tmp`.** `tmpfs` uses RAM, and its pages can only be reclaimed by swapping. When copying large files to `/tmp`, low-memory devices resort to swap. If swap resides on the same storage being read, I/O saturates, the hardware watchdog fails to respond, and the device resets. This occurred during testing: on a 128 MB board, copying 40 MB to `/tmp` rebooted the router mid-copy. Always download and extract to physical storage.
 
-`ts-update check` kertoo tilanteen suoraan, ja `ts-update run` keskeytyy
-ennen kuin mitään on ladattu. Vaihtoehdot:
+`ts-update check` reports disk space constraints directly, and `ts-update run` aborts before downloading. Options for small flash devices:
 
-1. **Pysy feedin versiossa** ja päivitä tailscale flashaamalla uusi image,
-   jossa on uudempi paketti mukana. Tämä on pienen flashin laitteen
-   natiivi tie.
-2. **Aja binäärit USB-levyltä** ja jätä `/usr/sbin`:iin pelkät symlinkit.
-   Symlinkki maksaa overlayssa tavuja, ei megatavuja.
+1. **Stay on feed package version** and update Tailscale by flashing a new OpenWrt image containing an updated package. This is the native path for 16 MB flash devices.
+2. **Run binaries from a USB drive** and leave symlinks in `/usr/sbin`. Symlinks cost bytes in overlay, not megabytes.
 
-### Binäärit USB-levylle
+### Running Binaries from USB Drive
 
-Ensimmäinen siirtymä tehdään käsin, koska ts-update ei muuta asettelua
-itse. Sen jälkeen ts-update hoitaa päivitykset normaalisti.
+The initial setup is done manually because `ts-update` does not alter layout structure. Afterward, `ts-update` handles updates normally.
 
-    V=1.102.2                       # ts-update check kertoo uusimman
-    A=mipsle                        # ts-update check kertoo arkkitehtuurin
-    mkdir -p /mnt/usb/tailscale /mnt/usb/tmp
-    cd /mnt/usb/tmp
-    wget "https://pkgs.tailscale.com/stable/tailscale_${V}_${A}.tgz"
-    wget "https://pkgs.tailscale.com/stable/tailscale_${V}_${A}.tgz.sha256"
-    echo "$(cat tailscale_${V}_${A}.tgz.sha256)  tailscale_${V}_${A}.tgz" | sha256sum -c
-    tar xzf "tailscale_${V}_${A}.tgz"
-    cp tailscale_${V}_${A}/tailscale tailscale_${V}_${A}/tailscaled /mnt/usb/tailscale/
-    chmod 755 /mnt/usb/tailscale/tailscale*
+```sh
+V=1.102.2                       # ts-update check shows latest version
+A=mipsle                        # ts-update check shows architecture
+mkdir -p /mnt/usb/tailscale /mnt/usb/tmp
+cd /mnt/usb/tmp
+wget "https://pkgs.tailscale.com/stable/tailscale_${V}_${A}.tgz"
+wget "https://pkgs.tailscale.com/stable/tailscale_${V}_${A}.tgz.sha256"
+echo "$(cat tailscale_${V}_${A}.tgz.sha256)  tailscale_${V}_${A}.tgz" | sha256sum -c
+tar xzf "tailscale_${V}_${A}.tgz"
+cp tailscale_${V}_${A}/tailscale tailscale_${V}_${A}/tailscaled /mnt/usb/tailscale/
+chmod 755 /mnt/usb/tailscale/tailscale*
 
-    /mnt/usb/tailscale/tailscale version    # testaa ENNEN kuin vaihdat mitään
+/mnt/usb/tailscale/tailscale version    # test BEFORE modifying anything
 
-    /etc/init.d/tailscale stop
-    rm -f /usr/sbin/tailscale /usr/sbin/tailscaled
-    ln -s /mnt/usb/tailscale/tailscaled /usr/sbin/tailscaled
-    ln -s /mnt/usb/tailscale/tailscale  /usr/sbin/tailscale
-    /etc/init.d/tailscale start
-    tailscale status
+/etc/init.d/tailscale stop
+rm -f /usr/sbin/tailscale /usr/sbin/tailscaled
+ln -s /mnt/usb/tailscale/tailscaled /usr/sbin/tailscaled
+ln -s /mnt/usb/tailscale/tailscale  /usr/sbin/tailscale
+/etc/init.d/tailscale start
+tailscale status
+```
 
-Sen jälkeen `/etc/default/ts-update`:
+Then configure `/etc/default/ts-update`:
 
-    SBIN_DIR=/mnt/usb/tailscale
-    BACKUP_DIR=/mnt/usb/ts-backup
-    TMP_DIR=/mnt/usb/tmp
-    # Tila pysyy flashissa, jotta boottitarkistus toimii vaikka USB olisi irti
-    STATE_DIR=/root/ts-update
+```sh
+SBIN_DIR=/mnt/usb/tailscale
+BACKUP_DIR=/mnt/usb/ts-backup
+TMP_DIR=/mnt/usb/tmp
+# State remains on flash so boot check works even if USB drive is disconnected
+STATE_DIR=/root/ts-update
+```
 
-Paluu feedin versioon: `/usr/sbin` on overlayfs, joten alkuperäiset
-tiedostot ovat yhä `/rom`issa symlinkkien alla. Poistamalla overlayn
-merkinnät ne tulevat takaisin:
+Reverting to feed version: `/usr/sbin` is on overlayfs, so original files remain in `/rom` behind symlinks. Removing overlay entries restores original files:
 
-    /etc/init.d/tailscale stop
-    rm -f /overlay/upper/usr/sbin/tailscale /overlay/upper/usr/sbin/tailscaled
-    reboot
+```sh
+/etc/init.d/tailscale stop
+rm -f /overlay/upper/usr/sbin/tailscale /overlay/upper/usr/sbin/tailscaled
+reboot
+```
 
-Kaksi varoitusta. **Daemon-binääri on tällöin irrotettavan levyn varassa:**
-jos mountti katoaa, tailscale kaatuu. Tee tämä vain laitteella, johon
-pääsee muutakin kautta kuin tailnetin yli. Ja **`apk upgrade` voi palauttaa
-feedin omat tiedostot** `/usr/sbin`:iin, jolloin symlinkit katoavat ja
-laite palaa vanhaan versioon — tarkista `ls -l /usr/sbin/tailscale*`
-paketti päivitysten jälkeen.
+Two warnings: **The daemon binary relies on external storage:** if mount is lost, Tailscale crashes. Use this only on devices accessible via secondary paths (LAN/serial). Also, **`apk upgrade` may restore feed binaries** to `/usr/sbin`, overwriting symlinks and reverting to the feed version — verify `ls -l /usr/sbin/tailscale*` after package upgrades.
 
-## Mitä tämä EI suojaa
+## What This Does NOT Protect Against
 
-- **Reitittimen kaatuminen tai jumittuminen.** Vahti elää samassa
-  laitteessa; jos koko laite kaatuu, mikään ei tee rollbackia ennen
-  boottausta — ja jos laite ei boottaa, ei senkään jälkeen.
-- **LAN-yhteyden tai virran menetys.** Boottitarkistus auttaa vain, jos
-  laite nousee ylös.
-- **Liian pieni flash.** 16 MB:n laitteella ylävirran binäärit eivät mahdu
-  `/usr/sbin`:iin lainkaan; ks. edellä. `check` ja `run` kertovat tämän,
-  mutta eivät voi kiertää sitä.
-- **apk-paketin päivitys.** `apk upgrade` asentaa feedin binäärit takaisin
-  `/usr/sbin`:iin (ja `tailscale`n taas symlinkkinä). Aja `ts-update run`
-  uudelleen paketin päivityksen jälkeen.
-- **Tailscalen konfiguraatiovirheet.** Terveystarkistus katsoo daemonin
-  tilaa, liitäntää ja mainostettuja reittejä — ei sitä, toimiiko ACL,
-  DNS tai exit node -reititys oikein. Testaa yhteys aina ulkopuolelta
-  ennen `confirm`ia.
-- **Ylävirran rikkinäinen julkaisu**, joka nousee pystyyn ja läpäisee
-  terveystarkistuksen mutta rikkoo jotain muuta. Siihen auttaa vain
-  vahvistusikkunan aikana tehty oma testaus.
-- **Kellon hyppy.** Määräaika on absoluuttinen aikaleima; boottitarkistus
-  rajaa jäljellä olevan ajan enintään `TIMEOUT`:iin, mutta rajua
-  taaksepäin hyppäävää kelloa se ei korjaa.
+- **Router crashes or freezes.** Watchdog runs on the same hardware; if the entire device hangs, rollback cannot trigger before reboot — and if device fails to boot, not after either.
+- **Loss of LAN connectivity or power.** Boot check only helps if the device boots up.
+- **Insufficient flash storage.** On 16 MB devices, upstream binaries do not fit in `/usr/sbin`; see USB section above. `check` and `run` report this but cannot bypass hardware limits.
+- **Package manager upgrades.** `apk upgrade` re-installs feed binaries to `/usr/sbin` (and `/usr/sbin/tailscale` as a symlink). Re-run `ts-update run` after package updates.
+- **Tailscale configuration errors.** Health check verifies daemon status, interface, and advertised routes — not whether ACLs, DNS, or exit node routing function as expected. Always test connections externally before `confirm`.
+- **Broken upstream releases** that start up and pass health check but break other functionality. Manual testing during confirmation window is essential.
+- **Clock jumps.** Deadline is an absolute timestamp; boot check caps remaining time to `TIMEOUT`, but severe backward clock jumps cannot be automatically corrected.
 
-## Kehitys
+## Development & Testing
 
-    shellcheck -s sh ts-update install.sh netinstall.sh ts-update-bootcheck.init tests/run-tests.sh
-    ./tests/run-tests.sh
+```sh
+shellcheck -s sh ts-update install.sh netinstall.sh ts-update-bootcheck.init tests/run-tests.sh
+./tests/run-tests.sh
+```
 
-GitHub Actions (`.github/workflows/ci.yml`) ajaa jokaisesta pushista ja
-pull requestista `shellcheck -s sh`in, `dash -n`-syntaksitarkistuksen ja
-testimatriisin kahdella kuorella: `dash` (tiukka POSIX) ja busybox ash
-(sama kuin OpenWrt:llä). Kuoren voi valita paikallisestikin:
-`TS_SH=dash ./tests/run-tests.sh`.
+GitHub Actions (`.github/workflows/ci.yml`) runs `shellcheck -s sh`, `dash -n` syntax check, and test matrix across two shells on every push and pull request: `dash` (strict POSIX) and busybox ash (same shell as OpenWrt). Select local test shell with `TS_SH=dash ./tests/run-tests.sh`.
 
-Testipeti ajaa koko koneiston hiekkalaatikossa: `tailscale`, init-skripti
-ja `wget` ovat tynkiä, "binäärit" ovat sh-skriptejä ja polut osoittavat
-väliaikaishakemistoon. Oikeaa laitetta ei tarvita eikä kosketa. Suite
-ajetaan kahdesti, jos `python3` löytyy: kerran sed-varapolulla ja kerran
-`jsonfilter`-tyngän kanssa. Yksittäiset tapaukset numerolla:
-`./tests/run-tests.sh 5 6`.
+Test suite runs in a sandbox: `tailscale`, init script, and `wget` are stubs, "binaries" are sh scripts printing version strings, and paths point to temporary directories. No real hardware is required or modified. Suite runs twice if `python3` is available: once using `sed` fallback and once with `jsonfilter` stub. Run individual cases by number: `./tests/run-tests.sh 5 6`.
 
-### Testimatriisi
+### Test Matrix
 
-| Tapaus | Odotus | Testi |
+| Case | Expected Outcome | Test |
 |---|---|---|
-| Jo uusin versio | `run` poistuu koodilla 0, ei kosketa mihinkään | 1 |
-| Verkko poikki kesken latauksen | ei varmuuskopiota, ei binäärinvaihtoa | 2 |
-| Tarkistussumma ei täsmää | lataus poistetaan, poistuu virheellä | 3 |
-| Uusi binääri ei nouse | automaattinen rollback ilman odotusta | 4 |
-| Vahvistus ajoissa | vahti kuolee, uusi versio jää | 5 |
-| Ei vahvistusta | rollback määräajan päätyttyä | 6 |
-| Kuivaharjoitus | lataus ja summa ok, mitään ei vaihdeta | 7 |
-| Arkkitehtuuria ei ole palvelimella | virhe ennen latausta | 8 |
-| Kaksi rinnakkaista ajoa | jälkimmäinen torjutaan | 9 |
-| Feed-versio `1.98.3-1` vs. `1.98.3` | ei näytä uudemmalta | 10 |
-| Boottaus vahvistusikkunassa, daemon kunnossa | vahti jatkaa, rollback määräajassa | 11 |
-| Boottaus vahvistusikkunassa, daemon rikki | rollback heti | 12 |
-| Mainostetut reitit katoavat | terveystarkistus kaatuu, rollback | 13 |
-| `check` ja `status` | näyttävät version, paketin ja vahvistustilan | 14 |
-| Boottaus binäärinvaihdon ja vahdin virityksen välissä | rollback, ei jää voimaan | 15 |
-| Vahvistus samaan aikaan kun vahti palauttaa | `confirm` kertoo todellisen tilan | 16 |
-| Vanhentunut `watchdog.pid` boottauksen jälkeen | ei tapa vierasta prosessia | 17 |
-| `netinstall.sh` GitHubista | asentaa, ei ylikirjoita asetuksia, torjuu katkenneen latauksen | 18 |
-| Feedin symlink-asettelu | varmuuskopio linkkinä, rollback palauttaa symlinkin | 19 |
-| Asennuskohde täynnä | keskeytys ennen latausta | 20 |
-| Kellon hyppy vahvistusikkunassa | ei ennenaikaista rollbackia | 21 |
-| Työhakemisto puuttuu | luodaan itse, virhe kertoo syyn | 22 |
+| Already on latest version | `run` exits with code 0, leaves system unmodified | 1 |
+| Network drops during download | no backup created, binaries unchanged | 2 |
+| Checksum mismatch | download removed, exits with error | 3 |
+| New binary fails to start | automatic immediate rollback | 4 |
+| Confirmation in time | watchdog disarmed, new version kept | 5 |
+| No confirmation | rollback executed upon deadline expiry | 6 |
+| Dry run | download and checksum verified, nothing changed | 7 |
+| Architecture not on server | error reported before download | 8 |
+| Concurrent runs | second instance rejected by lock | 9 |
+| Feed version `1.98.3-1` vs `1.98.3` | normalizes version, does not report newer | 10 |
+| Reboot during confirmation window, daemon healthy | watchdog resumed, rollback if unconfirmed | 11 |
+| Reboot during confirmation window, daemon broken | immediate rollback | 12 |
+| Advertised routes drop | health check fails, rollback executed | 13 |
+| `check` and `status` | display version, package availability, and confirmation state | 14 |
+| Reboot between binary swap and watchdog arming | rollback executed, incomplete update rejected | 15 |
+| Confirmation during watchdog rollback | `confirm` reports actual state | 16 |
+| Stale `watchdog.pid` after reboot | ignores alien process PID | 17 |
+| `netinstall.sh` from GitHub | installs, preserves config, rejects broken downloads | 18 |
+| Feed symlink layout | backup saved as link, rollback restores symlink | 19 |
+| Installation target full | aborts prior to download | 20 |
+| Clock jump during confirmation window | prevents premature rollback | 21 |
+| Working directory missing | directory created automatically, errors log reason | 22 |
 
-### Todettu oikealla laitteella
+### Verified on Hardware
 
-| Arkkitehtuuri | Laite | Tulos |
+| Architecture | Device | Result |
 |---|---|---|
-| `arm64` | aarch64 / OpenWrt 25.12.5 | ts-update ajossa, päivitykset vahtineen |
-| `mipsle` | ramips/mt7621, `DISTRIB_ARCH=mipsel_24kc` | ylävirran binääri toimii, `detect_arch` osuu oikeaan |
+| `arm64` | aarch64 / OpenWrt 25.12.5 | ts-update active, updates with watchdog protection |
+| `mipsle` | ramips/mt7621, `DISTRIB_ARCH=mipsel_24kc` | upstream binary runs, `detect_arch` correct |
 
-`mipsle`-laitteella binäärit ajetaan USB-levyltä symlinkkien takaa (ks.
-edellä): 16 MB:n flashiin ne eivät mahdu, mutta itse binääri nousi
-pystyyn ja liittyi tailnetiin normaalisti (`Starting -> Running`,
-`--state /etc/tailscale/tailscaled.state` luettiin, ei uudelleen­
-autentikointia). Muistinkulutus 31 MiB RSS 116 MiB:n laitteella.
+On `mipsle`, binaries run from USB drive behind symlinks (see above): storage insufficient for 16 MB flash, but binary started and joined tailnet normally (`Starting -> Running`, `--state /etc/tailscale/tailscaled.state` loaded, no re-authentication required). Memory usage 31 MiB RSS on 116 MiB board.
 
-Testaamatta yhä: `mips`, `mips64`, `mips64le`, `arm`, `amd64`, `386`,
-`riscv64`. `ts-update check` kertoo heti, osuiko arkkitehtuurin
-tunnistus oikeaan, ja väärä arvaus torjutaan ennen latausta.
+Untested hardware: `mips`, `mips64`, `mips64le`, `arm`, `amd64`, `386`, `riscv64`. `ts-update check` reports immediately if architecture detection matches server packages, and invalid guesses are rejected before downloading.

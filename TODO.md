@@ -1,106 +1,71 @@
-# ts-update — tilanne ja jäljellä oleva työ
+# ts-update — Status and Remaining Tasks
 
-## Mikä tämä on
+## Overview
 
-`ts-update` päivittää Tailscalen OpenWrt-reitittimellä ylävirran staattisista
-binääreistä (pkgs.tailscale.com) ja palauttaa edellisen version automaattisesti,
-ellei käyttäjä vahvista päivitystä määräajassa. Tarkoitettu etäpäivitykseen,
-jossa epäonnistuminen katkaisisi ainoan yhteyden laitteeseen.
+`ts-update` performs semi-automated updates of Tailscale on OpenWrt routers using upstream static binaries ([pkgs.tailscale.com](https://pkgs.tailscale.com)) and automatically rolls back to the previous version unless confirmed within a configurable timeout window. Designed for remote updates where failure would disconnect the device.
 
-Tausta ja käyttöohjeet: ks. [README.md](README.md).
+Background and usage instructions: see [README.md](README.md).
 
-## Nykytila
+## Current Status
 
-Ajossa yhdellä reitittimellä (aarch64, OpenWrt 25.12.5). Toiminnot:
+Active on single router (aarch64, OpenWrt 25.12.5). Commands implemented:
 `check`, `run [--dry-run]`, `confirm`, `rollback`, `status`, `boot-check`,
-sisäinen `_watchdog`. Varmuuskopio `/root/ts-backup/*.gz`, odottava tila
-`/root/ts-update/`, vahti irrotettu istunnosta `setsid`illä.
+internal `_watchdog`. Backup saved at `/root/ts-backup/*.gz`, pending state
+at `/root/ts-update/`, watchdog detached from session using `setsid`.
 
-Repossa myös `install.sh` (monen laitteen asennus), `ts-update-bootcheck.init`
-(boottitarkistus), `ts-update.default` (asetusmalli) ja `tests/run-tests.sh`
-(testimatriisi hiekkalaatikossa, ei vaadi oikeaa laitetta).
+Repository includes `install.sh` (multi-host deployment), `ts-update-bootcheck.init`
+(boot check init script), `ts-update.default` (config template), and `tests/run-tests.sh`
+(sandboxed test matrix, no real hardware required).
 
-## Tehdyt tehtävät
+## Completed Tasks
 
-### 1. jsonfilter sed-jäsennyksen tilalle — tehty
-`latest_version()`, `tarball_list()`, `backend_state()` ja `prefs_routes()`
-käyttävät `jsonfilter`iä (`@.TarballsVersion`, `@.Tarballs[*]`,
-`@.BackendState`, `@.AdvertiseRoutes[*]`). sed-varapolku on jäljellä, jos
-`jsonfilter` puuttuu; testipeti ajaa molemmat polut.
+### 1. jsonfilter replacing sed parsing — completed
+`latest_version()`, `tarball_list()`, `backend_state()`, and `prefs_routes()`
+use `jsonfilter` (`@.TarballsVersion`, `@.Tarballs[*]`,
+`@.BackendState`, `@.AdvertiseRoutes[*]`). sed fallback path remains if
+`jsonfilter` is absent; test matrix executes both code paths.
 
-### 2. Arkkitehtuurin validointi palvelimen listaa vasten — tehty
-`tarball_available()` tarkistaa `Tarballs`-kartasta, että juuri tämä
-versio/arkkitehtuuri on olemassa, ennen kuin mitään ladataan. Virheviesti
-listaa saatavilla olevat arkkitehtuurit. `detect_arch()` on edelleen
-ensimmäinen arvaus, mutta väärä arvaus huomataan nyt ennen latausta.
+### 2. Architecture validation against server list — completed
+`tarball_available()` verifies against server `Tarballs` map that the exact
+version/architecture exists before downloading. Error message lists available architectures. `detect_arch()` serves as initial detection, but invalid guesses are caught before downloading.
 
-### 3. Lukitus — tehty
-`flock -n` fd 9:llä `run`issa ja `rollback`issa; vahti odottaa lukkoa
-enintään 120 s ja tekee rollbackin senkin jälkeen (yhteyden palautus voittaa).
-Varapolkuna hakemistolukko, joka siivotaan jos lukinnut prosessi on kuollut.
-Vahtiprosessille annetaan `9>&-`, ettei se peri lukkoa koko ikkunan ajaksi.
+### 3. Concurrency locking — completed
+`flock -n` on fd 9 in `run` and `rollback`; watchdog waits for lock up to 120s and performs rollback regardless (recovering connection takes priority). Directory lock fallback cleaned up if lock-owning process dies. Watchdog process is spawned with `9>&-` so it does not hold lock for the entire confirmation window.
 
-### 4. Levytilan tarkistus — tehty
-`need_space()` ennen latausta (`/tmp`), varmuuskopiota (`/root`) ja
-binäärien vaihtoa (`/usr/sbin`). Keskeytys tapahtuu ennen kuin mihinkään
-on koskettu. Jos `df` ei kerro mitään järkevää, jatketaan varoituksella.
+### 4. Disk space check — completed
+`need_space()` checked prior to download (`/tmp`), backup (`/root`), and binary replacement (`/usr/sbin`). Execution halts before any files are modified. If `df` returns no usable data, execution continues with a warning.
 
-### 5. Vahti selviää uudelleenkäynnistyksestä — tehty
-Odottava tila on `/root/ts-update/`ssa, ei `/tmp`:ssä. `boot-check` +
-`/etc/init.d/ts-update-bootcheck` tarkistaa boottauksessa: jos daemon ei
-nouse tai määräaika ehti umpeutua → rollback, muuten vahti viritetään
-uudelleen jäljellä olevaksi ajaksi. Määräaika on absoluuttinen aikaleima ja
-rajataan boottauksessa enintään `TIMEOUT`:iin ntp-hyppyjen varalta.
+### 5. Watchdog survives reboots — completed
+Pending state stored in `/root/ts-update/` instead of `/tmp`. `boot-check` +
+`/etc/init.d/ts-update-bootcheck` evaluates on boot: if daemon fails to start or confirmation window expired → rollback; otherwise watchdog re-arms for remaining window duration. Deadline is an absolute timestamp and capped to `TIMEOUT` on boot against NTP clock jumps.
 
-### 6. Versiovertailu — tehty
-`normalize_version()` pudottaa `v`-etuliitteen, `-1`-tyyliset lisäosat ja
-`(OpenWrt)`-loppuosan; `version_newer()` vertaa numeerisesti. Feed-versio
-`1.98.3-1 (OpenWrt)` ei enää näytä eri versiolta kuin ylävirran `1.98.3`.
+### 6. Version comparison — completed
+`normalize_version()` strips `v` prefix, `-1` package suffixes, and `(OpenWrt)` suffix; `version_newer()` performs numeric comparison. Feed version `1.98.3-1 (OpenWrt)` no longer appears as a distinct version from upstream `1.98.3`.
 
-### 7. Kuivaharjoitus — tehty
-`ts-update run --dry-run` lataa, tarkistaa summan ja ajaa uuden binäärin
-kerran, mutta ei pysäytä palvelua eikä vaihda mitään.
+### 7. Dry run — completed
+`ts-update run --dry-run` downloads, verifies checksum, and tests new binary execution once, but does not stop service or swap binaries.
 
-### 8. Terveystarkistuksen kattavuus — tehty
-`BackendState: Running`, verkkoliitännän (`IFACE`, oletus `tailscale0`)
-olemassaolo, mainostettujen reittien säilyminen (`tailscale debug prefs`,
-verrataan päivitystä edeltävään tilaan) ja valinnainen `tailscale ping PEER`.
-Vertailukohta otetaan talteen ennen päivitystä, joten tarkistus ei vaadi
-laitekohtaista konfigurointia. Epäonnistumisen syy kirjataan lokiin.
+### 8. Health check scope expansion — completed
+Checks `BackendState: Running`, network interface presence (`IFACE`, default `tailscale0`), advertised routes preservation (`tailscale debug prefs`, compared against pre-update snapshot), and optional `tailscale ping PEER`. Pre-update snapshot taken automatically before update, so no host-specific setup required. Failure reasons logged.
 
-### 9. Monen laitteen asennus — tehty
-`install.sh` ottaa hostit argumentteina tai `-f`-tiedostosta, käyttää
-`scp -O`:ta (OpenWrt:ssä ei ole sftp-serveriä), asentaa myös
-boottitarkistuksen ja vie laitekohtaisen `/etc/default/ts-update`-tiedoston
-hakemistosta `hosts.d/<host>.env`. Yhteinen oletus annetaan `-e`:llä;
-ilman sitä laitteen omia asetuksia ei ylikirjoiteta. `-n` näyttää mitä
-tehtäisiin.
+### 9. Multi-host deployment — completed
+`install.sh` accepts hosts as arguments or `-f` list file, uses `scp -O` (OpenWrt lacks SFTP server), deploys boot check init script, and transfers host-specific `/etc/default/ts-update` configuration from `hosts.d/<host>.env`. Default configuration supplied via `-e`; existing target configuration preserved without `-e`. `-n` displays execution plan without modifying targets.
 
-### 10. Tarkistukset ja dokumentaatio — tehty
-`shellcheck -s sh` menee puhtaana läpi kaikista skripteistä. README kertoo
-asennuksen, käytön ja erikseen sen, mitä skripti EI suojaa.
+### 10. Verification and documentation — completed
+`shellcheck -s sh` passes cleanly on all scripts. README covers installation, usage, and explicit protection boundaries.
 
-## Jäljellä
+## Remaining Tasks
 
-- **Muut arkkitehtuurit testaamatta oikealla laudalla**: `mips`,
-  `mips64`, `mips64le`, `arm`, `amd64`, `386`, `riscv64`.
-  `detect_arch()`in osuma näkyy heti `ts-update check`istä, ja väärä
-  arvaus torjutaan ennen latausta.
-  - `arm64`: ajossa, päivitykset vahtineen.
-  - `mipsle`: todettu ramips/mt7621:llä (`DISTRIB_ARCH=mipsel_24kc`).
-    Ylävirran binääri nousee pystyyn ja liittyy tailnetiin, mutta
-    laitteen 16 MB:n flashiin se ei mahdu — binäärit ajetaan USB:ltä
-    symlinkkien takaa, jolloin ts-update toimii `SBIN_DIR`in kautta.
-    Itse ts-updaten päivityskierrosta ei ole vielä ajettu siellä läpi.
-- **Boottitarkistus testattu vain hiekkalaatikossa** (testit 11 ja 12).
-  Oikea uudelleenkäynnistys kesken vahvistusikkunan on vielä ajamatta.
-- **apk-paketin päivitys** palauttaa feedin binäärit `/usr/sbin`:iin.
-  Nyt siitä vain varoitetaan READMEssä; automaattista havaitsemista
-  (esim. `check` huomaisi symlinkin palanneen) ei ole.
-- **Lokin kierrätys** on karkea (leikkaus 500 riviin, kun tiedosto ylittää
-  256 kt). Riittänee, mutta ei ole testattu pitkällä ajolla.
+- **Additional architectures untested on real hardware**: `mips`, `mips64`, `mips64le`, `arm`, `amd64`, `386`, `riscv64`.
+  `detect_arch()` accuracy is visible in `ts-update check`, and invalid guesses are caught before downloading.
+  - `arm64`: running, updates with watchdog protection verified.
+  - `mipsle`: verified on ramips/mt7621 (`DISTRIB_ARCH=mipsel_24kc`). Upstream binary runs and connects to tailnet, but 16 MB flash storage cannot fit binaries — binaries run from USB drive via symlinks, with ts-update operating via `SBIN_DIR`. Full ts-update update cycle not yet executed on device.
+- **Boot check tested only in sandbox** (tests 11 and 12).
+  Real reboot mid-confirmation window pending hardware test.
+- **Package manager upgrades** restore feed binaries to `/usr/sbin`.
+  Currently documented in README; automatic detection (e.g., `check` detecting restored symlink) not implemented.
+- **Log rotation** is simple (truncation to 500 lines when file exceeds 256 KB). Sufficient for usage, but long-term run unverified.
 
-## Testimatriisi
+## Test Matrix
 
-Ajetaan `./tests/run-tests.sh` (hiekkalaatikko, ei vaadi laitetta);
-tapauskohtainen erittely on READMEssä.
+Execute `./tests/run-tests.sh` (sandboxed, no hardware required); per-case details documented in README.

@@ -1,26 +1,26 @@
 #!/bin/sh
-# run-tests.sh — ajaa TODO:n testimatriisin hiekkalaatikossa.
+# run-tests.sh — runs test matrix in a sandbox.
 #
-# Mitään oikeaa ei kosketa: ts-update ohjataan ympäristömuuttujilla
+# No real files/devices modified: ts-update is pointed via environment variables
 # (STATE_DIR, BACKUP_DIR, SBIN_DIR, INIT_SCRIPT, TMP_DIR, BASE_URL)
-# tilapäiseen hakemistoon, ja tailscale, init-skripti ja wget ovat
-# tynkiä. "Binäärit" ovat sh-skriptejä, jotka tulostavat versionsa.
+# to a temporary directory, and tailscale, init script, and wget are stubs.
+# "Binaries" are sh scripts that output their version.
 #
-#   ./tests/run-tests.sh          aja kaikki
-#   ./tests/run-tests.sh 5 6      aja vain testit 5 ja 6
+#   ./tests/run-tests.sh          run all tests
+#   ./tests/run-tests.sh 5 6      run only tests 5 and 6
 #
-# Suite ajetaan kahdesti, jos python3 löytyy: kerran ilman jsonfilteriä
-# (sed-varapolku) ja kerran jsonfilter-tyngän kanssa. TS_SH valitsee
-# kuoren, jolla ts-update ajetaan (oletus sh).
+# Suite is run twice if python3 is available: once without jsonfilter
+# (sed fallback path) and once with a jsonfilter stub. TS_SH selects
+# the shell used to execute ts-update (default: sh).
 
-# shellcheck disable=SC2317  # apurit ja testitapaukset kutsutaan epäsuorasti
+# shellcheck disable=SC2317  # helpers and test cases called indirectly
 set -u
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$SRC/ts-update"
 WANT="$*"
-# Kuori, jolla ts-update ajetaan. OpenWrt:llä se on busybox ash, joten
-# CI ajaa suiten sekä dashilla että busyboxilla.
+# Shell used to run ts-update. On OpenWrt it is busybox ash, so
+# CI runs the suite with both dash and busybox.
 TS_SH="${TS_SH:-sh}"
 ROOT="${TMPDIR:-/tmp}/ts-update-tests.$$"
 PASS=0
@@ -40,23 +40,23 @@ ok()   { PASS=$((PASS + 1)); printf '  ok   %s\n' "$*"; }
 bad()  { FAIL=$((FAIL + 1)); FAILED="$FAILED
   - $CASE: $*"; printf '  FAIL %s\n' "$*"; }
 
-assert()      { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (odotettu '$3', saatiin '$2')"; fi; }
-assert_file() { if [ -e "$2" ]; then ok "$1"; else bad "$1 (puuttuu: $2)"; fi; }
-assert_nofile() { if [ ! -e "$2" ]; then ok "$1"; else bad "$1 (ei pitäisi olla: $2)"; fi; }
+assert()        { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$3', got '$2')"; fi; }
+assert_file()   { if [ -e "$2" ]; then ok "$1"; else bad "$1 (missing: $2)"; fi; }
+assert_nofile() { if [ ! -e "$2" ]; then ok "$1"; else bad "$1 (should not exist: $2)"; fi; }
 
-# --- hiekkalaatikko -----------------------------------------------------
+# --- sandbox ------------------------------------------------------------
 
-# fake_binary <tiedosto> <versio> [BROKEN]
+# fake_binary <file> <version> [BROKEN]
 fake_binary() {
 	cat > "$1" <<EOF
 #!/bin/sh
-# tynkä-tailscale $2 ${3:-}
+# stub-tailscale $2 ${3:-}
 V="$2"
 STATE="$SB"
 case "\$1 \${2:-}" in
 	"version "*)
 		echo "\$V"
-		echo "  go version: tynkä"
+		echo "  go version: stub"
 		;;
 	"status --json")
 		if [ -f "\$STATE/daemon.pid" ]; then
@@ -73,15 +73,15 @@ case "\$1 \${2:-}" in
 		echo "pong"
 		;;
 	"status "*|"status")
-		echo "tynkä status \$V"
+		echo "stub status \$V"
 		;;
-	*) echo "tynkä: tuntematon komento: \$*" >&2; exit 1 ;;
+	*) echo "stub: unknown command: \$*" >&2; exit 1 ;;
 esac
 EOF
 	chmod 755 "$1"
 }
 
-make_tarball() {  # make_tarball <versio> <arch> [BROKEN]
+make_tarball() {  # make_tarball <version> <arch> [BROKEN]
 	_v="$1"; _a="$2"; _b="${3:-}"
 	_d="$SB/build/tailscale_${_v}_${_a}"
 	mkdir -p "$_d"
@@ -92,7 +92,7 @@ make_tarball() {  # make_tarball <versio> <arch> [BROKEN]
 		> "$SB/www/tailscale_${_v}_${_a}.tgz.sha256"
 }
 
-write_json() {  # write_json <TarballsVersion> <arkkitehtuurit...>
+write_json() {  # write_json <TarballsVersion> <architectures...>
 	_v="$1"; shift
 	{
 		printf '{\n  "TarballsVersion": "%s",\n  "Tarballs": {\n' "$_v"
@@ -106,7 +106,7 @@ write_json() {  # write_json <TarballsVersion> <arkkitehtuurit...>
 	} > "$SB/www/index.json"
 }
 
-setup() {  # setup [nykyinen versio]
+setup() {  # setup [current version]
 	_cur="${1:-$OLD}"
 	SB="$ROOT/case${CASE%% *}"
 	rm -rf "$SB"
@@ -118,7 +118,7 @@ setup() {  # setup [nykyinen versio]
 	fake_binary "$SB/sbin/tailscaled" "$_cur"
 	touch "$SB/daemon.pid"
 
-	# init-tynkä: käynnistyy vain jos tailscaled ei ole rikki
+	# init stub: starts only if tailscaled is not broken
 	cat > "$SB/bin/init-tailscale" <<EOF
 #!/bin/sh
 case "\$1" in
@@ -129,9 +129,9 @@ exit 0
 EOF
 	chmod 755 "$SB/bin/init-tailscale"
 
-	# wget-tynkä: tarjoilee $SB/www:sta, kaatuu jos $SB/netdown on olemassa.
-	# Annetaan ts-updatelle WGET-muuttujana, koska busybox sh voi olla
-	# käännetty standalone-tilaan, jolloin PATH-tynkä ei näkyisi.
+	# wget stub: serves from $SB/www, fails if $SB/netdown exists.
+	# Passed to ts-update via WGET variable since busybox sh can be built
+	# in standalone mode where PATH stub would not be visible.
 	cat > "$SB/bin/wget" <<EOF
 #!/bin/sh
 out=""; url=""
@@ -165,7 +165,7 @@ EOF
 
 ts() {
 	env -i \
-		PATH="$SB/bin:$SB/sbin:/usr/bin:/bin" \
+		PATH="$SB/bin:$SB/sbin:/usr/bin:/bin:/sbin:/usr/sbin" \
 		HOME="$SB" \
 		CONFIG_FILE=/dev/null \
 		STATE_DIR="$SB/state" \
@@ -174,7 +174,7 @@ ts() {
 		INIT_SCRIPT="$SB/bin/init-tailscale" \
 		LOCK_FILE="$SB/lock" \
 		TMP_DIR="${TS_TMP_DIR:-$SB/tmp}" \
-		BASE_URL="http://tynkä/stable" \
+		BASE_URL="http://stub/stable" \
 		WGET="$SB/bin/wget" \
 		ARCH="$ARCH" \
 		TIMEOUT="${TS_TIMEOUT:-300}" \
@@ -188,174 +188,173 @@ installed_version() { "$SB/sbin/tailscale" version | head -n1; }
 
 want() { case " $WANT " in *" $1 "*) return 0 ;; esac; [ -z "$WANT" ]; }
 
-# --- testit -------------------------------------------------------------
+# --- tests --------------------------------------------------------------
 
 case1() {
-	CASE="1 jo uusin versio"; setup "$NEW"; say "$CASE"
+	CASE="1 already on latest version"; setup "$NEW"; say "$CASE"
 	out="$(ts run 2>&1)"; rc=$?
-	assert "poistuu koodilla 0" "$rc" 0
-	case "$out" in *"Jo uusin"*) ok "kertoo olevansa ajan tasalla" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert_nofile "ei varmuuskopiota" "$SB/backup/tailscaled.gz"
-	assert_nofile "ei odottavaa päivitystä" "$SB/state/deadline"
+	assert "exits with code 0" "$rc" 0
+	case "$out" in *"Already on latest"*) ok "reports up to date" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert_nofile "no backup created" "$SB/backup/tailscaled.gz"
+	assert_nofile "no pending update" "$SB/state/deadline"
 }
 
 case2() {
-	CASE="2 verkko poikki kesken latauksen"; setup; say "$CASE"
+	CASE="2 network interrupted during download"; setup; say "$CASE"
 	rm -f "$SB/www/tailscale_${NEW}_${ARCH}.tgz"
 	out="$(ts run 2>&1)"; rc=$?
-	assert "poistuu virheellä" "$rc" 1
-	case "$out" in *"lataus epäonnistui"*) ok "kertoo latausvirheestä" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert_nofile "ei varmuuskopiota" "$SB/backup/tailscaled.gz"
-	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
-	assert_file "daemon jätettiin rauhaan" "$SB/daemon.pid"
+	assert "exits with error" "$rc" 1
+	case "$out" in *"download failed"*) ok "reports download error" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert_nofile "no backup created" "$SB/backup/tailscaled.gz"
+	assert "binary not modified" "$(installed_version)" "$OLD"
+	assert_file "daemon untouched" "$SB/daemon.pid"
 }
 
 case3() {
-	CASE="3 tarkistussumma ei täsmää"; setup; say "$CASE"
+	CASE="3 checksum mismatch"; setup; say "$CASE"
 	echo "0000000000000000000000000000000000000000000000000000000000000000" \
 		> "$SB/www/tailscale_${NEW}_${ARCH}.tgz.sha256"
 	out="$(ts run 2>&1)"; rc=$?
-	assert "poistuu virheellä" "$rc" 1
-	case "$out" in *"tarkistussumma ei täsmää"*) ok "kertoo summavirheestä" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert_nofile "lataus siivottiin" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
-	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
+	assert "exits with error" "$rc" 1
+	case "$out" in *"checksum mismatch"*) ok "reports checksum error" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert_nofile "download cleaned up" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
+	assert "binary not modified" "$(installed_version)" "$OLD"
 }
 
 case4() {
-	CASE="4 uusi binääri ei nouse"; setup; say "$CASE"
+	CASE="4 new binary fails to start"; setup; say "$CASE"
 	make_tarball "$NEW" "$ARCH" BROKEN
 	out="$(ts run 2>&1)"; rc=$?
-	assert "poistuu virheellä" "$rc" 1
-	case "$out" in *"palautetaan"*) ok "tekee rollbackin odottamatta" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert "vanha versio takaisin" "$(installed_version)" "$OLD"
-	assert_file "daemon pystyssä" "$SB/daemon.pid"
-	assert_nofile "ei jää odottamaan vahvistusta" "$SB/state/deadline"
+	assert "exits with error" "$rc" 1
+	case "$out" in *"rolling back"*|*"restoring"*) ok "performs immediate rollback" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert "old version restored" "$(installed_version)" "$OLD"
+	assert_file "daemon running" "$SB/daemon.pid"
+	assert_nofile "no pending deadline" "$SB/state/deadline"
 }
 
 case5() {
-	CASE="5 vahvistus ajoissa"; setup; say "$CASE"
+	CASE="5 confirmation in time"; setup; say "$CASE"
 	TS_TIMEOUT=60 ts run >/dev/null 2>&1
-	assert "uusi versio asennettu" "$(installed_version)" "$NEW"
-	assert_file "vahti viritetty" "$SB/state/deadline"
+	assert "new version installed" "$(installed_version)" "$NEW"
+	assert_file "watchdog armed" "$SB/state/deadline"
 	pid="$(cat "$SB/state/watchdog.pid")"
 	ts confirm >/dev/null 2>&1
-	sleep 8   # pidempi kuin vahdin pollausväli
-	if kill -0 "$pid" 2>/dev/null; then bad "vahti jäi henkiin"; else ok "vahti kuoli"; fi
-	assert_nofile "määräaika poistettu" "$SB/state/deadline"
-	assert "uusi versio jäi voimaan" "$(installed_version)" "$NEW"
+	sleep 8   # longer than watchdog poll interval
+	if kill -0 "$pid" 2>/dev/null; then bad "watchdog remained alive"; else ok "watchdog disarmed"; fi
+	assert_nofile "deadline file removed" "$SB/state/deadline"
+	assert "new version remains active" "$(installed_version)" "$NEW"
 }
 
 case6() {
-	CASE="6 ei vahvistusta"; setup; say "$CASE"
+	CASE="6 no confirmation"; setup; say "$CASE"
 	TS_TIMEOUT=5 ts run >/dev/null 2>&1
-	assert "uusi versio asennettu" "$(installed_version)" "$NEW"
+	assert "new version installed" "$(installed_version)" "$NEW"
 	i=0
 	while [ "$i" -lt 30 ] && [ -f "$SB/state/deadline" ]; do sleep 1; i=$((i + 1)); done
 	sleep 2
-	assert "rollback määräajan jälkeen" "$(installed_version)" "$OLD"
-	assert_file "daemon pystyssä rollbackin jälkeen" "$SB/daemon.pid"
-	assert_nofile "tila siivottu" "$SB/state/deadline"
+	assert "rollback after timeout" "$(installed_version)" "$OLD"
+	assert_file "daemon running after rollback" "$SB/daemon.pid"
+	assert_nofile "state cleaned up" "$SB/state/deadline"
 }
 
 case7() {
-	CASE="7 kuivaharjoitus"; setup; say "$CASE"
+	CASE="7 dry run"; setup; say "$CASE"
 	out="$(ts run --dry-run 2>&1)"; rc=$?
-	assert "poistuu koodilla 0" "$rc" 0
-	case "$out" in *"Kuivaharjoitus valmis"*) ok "kertoo tuloksen" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
-	assert_file "daemonia ei pysäytetty" "$SB/daemon.pid"
-	assert_nofile "ei varmuuskopiota" "$SB/backup/tailscaled.gz"
-	assert_nofile "ei odottavaa päivitystä" "$SB/state/deadline"
-	assert_nofile "väliaikaistiedostot siivottu" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
+	assert "exits with code 0" "$rc" 0
+	case "$out" in *"Dry run complete"*) ok "reports result" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert "binary not modified" "$(installed_version)" "$OLD"
+	assert_file "daemon not stopped" "$SB/daemon.pid"
+	assert_nofile "no backup created" "$SB/backup/tailscaled.gz"
+	assert_nofile "no pending update" "$SB/state/deadline"
+	assert_nofile "temporary files cleaned up" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
 }
 
 case8() {
-	CASE="8 arkkitehtuuria ei ole palvelimella"; setup; say "$CASE"
+	CASE="8 architecture not on server"; setup; say "$CASE"
 	write_json "$NEW" amd64 mipsle
 	out="$(ts run 2>&1)"; rc=$?
-	assert "poistuu virheellä" "$rc" 1
-	case "$out" in *"ei ole pakettia"*) ok "kertoo puuttuvasta paketista" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	case "$out" in *"amd64"*) ok "listaa saatavilla olevat" ;;
-		*) bad "ei listaa vaihtoehtoja: $out" ;; esac
-	assert_nofile "mitään ei ladattu" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
-	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
+	assert "exits with error" "$rc" 1
+	case "$out" in *"does not have package"*) ok "reports missing package" ;;
+		*) bad "unexpected output: $out" ;; esac
+	case "$out" in *"amd64"*) ok "lists available architectures" ;;
+		*) bad "does not list options: $out" ;; esac
+	assert_nofile "nothing downloaded" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
+	assert "binary not modified" "$(installed_version)" "$OLD"
 }
 
 case9() {
-	CASE="9 lukitus"; say "$CASE"
+	CASE="9 concurrency lock"; say "$CASE"
 	if ! command -v flock >/dev/null 2>&1; then
-		say "  ohitettu (flock puuttuu tästä koneesta)"
+		say "  skipped (flock missing on host)"
 		return 0
 	fi
 	setup
-	# pidetään lukkoa toisesta prosessista
+	# hold lock from another process
 	sh -c "exec 9>\"$SB/lock\"; flock 9; sleep 6" &
 	holder=$!
 	sleep 1
 	out="$(ts run 2>&1)"; rc=$?
-	assert "toinen ajo torjutaan" "$rc" 1
-	case "$out" in *"Toinen ts-update-ajo"*) ok "kertoo syyn" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
+	assert "concurrent run rejected" "$rc" 1
+	case "$out" in *"Another ts-update instance"*) ok "reports reason" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert "binary not modified" "$(installed_version)" "$OLD"
 	kill "$holder" 2>/dev/null
 	wait "$holder" 2>/dev/null
 }
 
 case10() {
-	CASE="10 feed-versio ei näytä uudemmalta"; setup "1.98.3-1 (OpenWrt)"; say "$CASE"
+	CASE="10 feed version does not look newer"; setup "1.98.3-1 (OpenWrt)"; say "$CASE"
 	write_json 1.98.3 "$ARCH"
 	out="$(ts run 2>&1)"; rc=$?
-	assert "poistuu koodilla 0" "$rc" 0
-	case "$out" in *"Jo uusin"*) ok "normalisoi versiovertailun" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert_nofile "ei odottavaa päivitystä" "$SB/state/deadline"
+	assert "exits with code 0" "$rc" 0
+	case "$out" in *"Already on latest"*) ok "normalizes version comparison" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert_nofile "no pending update" "$SB/state/deadline"
 }
 
 case11() {
-	CASE="11 boottaus vahvistusikkunassa, daemon kunnossa"; setup; say "$CASE"
+	CASE="11 boot during confirmation window, daemon healthy"; setup; say "$CASE"
 	TS_TIMEOUT=120 ts run >/dev/null 2>&1
-	# simuloi boottia: vahti tapetaan, tila jää levylle
+	# simulate boot: kill watchdog, state remains on disk
 	kill "$(cat "$SB/state/watchdog.pid")" 2>/dev/null
 	sleep 1
-	assert_file "määräaika säilyi levyllä" "$SB/state/deadline"
-	# Boottauksessa uptime nollautuu, jolloin edellisellä käynnistyskerralla
-	# kirjattu monotoninen määräaika jää kauas tulevaisuuteen ja hylätään.
-	# Ilman tätä simulaatio ei vastaisi oikeaa boottausta.
+	assert_file "deadline preserved on disk" "$SB/state/deadline"
+	# On boot uptime resets, causing monotonic deadline from previous session to be discarded.
 	echo "$(( $(awk '{print int($1)}' /proc/uptime) + 100000 ))" \
 		> "$SB/state/deadline.uptime"
-	# seinäkellon määräaika lähelle nykyhetkeä, jotta rollback ehtii testiin
+	# set wall-clock deadline near present to allow rollback in test
 	echo "$(( $(date +%s) + 5 ))" > "$SB/state/deadline"
 	TS_TIMEOUT=120 ts boot-check >/dev/null 2>&1
-	assert_file "vahti viritetty uudelleen" "$SB/state/watchdog.pid"
+	assert_file "watchdog re-armed" "$SB/state/watchdog.pid"
 	i=0
 	while [ "$i" -lt 30 ] && [ -f "$SB/state/deadline" ]; do sleep 1; i=$((i + 1)); done
 	sleep 2
-	assert "rollback tapahtui boottauksen jälkeenkin" "$(installed_version)" "$OLD"
+	assert "rollback executed after reboot" "$(installed_version)" "$OLD"
 }
 
 case12() {
-	CASE="12 boottaus vahvistusikkunassa, daemon rikki"; setup; say "$CASE"
+	CASE="12 boot during confirmation window, daemon broken"; setup; say "$CASE"
 	TS_TIMEOUT=120 ts run >/dev/null 2>&1
 	kill "$(cat "$SB/state/watchdog.pid")" 2>/dev/null
 	sleep 1
-	rm -f "$SB/daemon.pid"          # daemon ei noussut boottauksessa
-	sed -i 's/^# tynkä-tailscale.*/# tynkä-tailscale BROKEN/' "$SB/sbin/tailscaled"
+	rm -f "$SB/daemon.pid"          # daemon failed to start on boot
+	sed -i '' 's/^# stub-tailscale.*/# stub-tailscale BROKEN/' "$SB/sbin/tailscaled" 2>/dev/null || \
+		sed -i 's/^# stub-tailscale.*/# stub-tailscale BROKEN/' "$SB/sbin/tailscaled"
 	out="$(TS_TIMEOUT=120 ts boot-check 2>&1)"
-	case "$out" in *"palautetaan"*) ok "boot-check tekee rollbackin" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert "vanha versio takaisin" "$(installed_version)" "$OLD"
-	assert_nofile "tila siivottu" "$SB/state/deadline"
+	case "$out" in *"rolling back"*|*"failed"*) ok "boot-check executes rollback" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert "old version restored" "$(installed_version)" "$OLD"
+	assert_nofile "state cleaned up" "$SB/state/deadline"
 }
 
 case13() {
-	CASE="13 mainostetut reitit katoavat"; setup; say "$CASE"
-	# uusi versio "unohtaa" reitit: prefs tyhjennetään kun uusi daemon nousee
+	CASE="13 advertised routes disappear"; setup; say "$CASE"
+	# new version drops routes: prefs cleared when new daemon starts
 	cat > "$SB/bin/init-tailscale" <<EOF
 #!/bin/sh
 case "\$1" in
@@ -370,185 +369,185 @@ exit 0
 EOF
 	chmod 755 "$SB/bin/init-tailscale"
 	out="$(TS_HEALTH_WAIT=6 ts run 2>&1)"; rc=$?
-	assert "poistuu virheellä" "$rc" 1
-	case "$out" in *"mainostetut reitit"*) ok "huomaa kadonneet reitit" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert "vanha versio takaisin" "$(installed_version)" "$OLD"
+	assert "exits with error" "$rc" 1
+	case "$out" in *"advertised routes"*) ok "detects lost routes" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert "old version restored" "$(installed_version)" "$OLD"
 }
 
 case14() {
-	CASE="14 status ja check"; setup; say "$CASE"
+	CASE="14 status and check"; setup; say "$CASE"
 	out="$(ts check 2>&1)"
-	case "$out" in *"$NEW"*) ok "check näyttää uusimman" ;;
-		*) bad "check ei näytä uusinta: $out" ;; esac
-	case "$out" in *"tailscale_${NEW}_${ARCH}.tgz"*) ok "check vahvistaa paketin olemassaolon" ;;
-		*) bad "check ei tarkista pakettia: $out" ;; esac
+	case "$out" in *"$NEW"*) ok "check shows latest version" ;;
+		*) bad "check fails to show latest: $out" ;; esac
+	case "$out" in *"tailscale_${NEW}_${ARCH}.tgz"*) ok "check confirms package presence" ;;
+		*) bad "check does not verify package: $out" ;; esac
 	out="$(ts status 2>&1)"
-	case "$out" in *"ei odottavaa päivitystä"*) ok "status: ei odottavaa" ;;
-		*) bad "status väärin: $out" ;; esac
+	case "$out" in *"no pending update"*) ok "status: no pending update" ;;
+		*) bad "status incorrect: $out" ;; esac
 	TS_TIMEOUT=60 ts run >/dev/null 2>&1
 	out="$(ts status 2>&1)"
-	case "$out" in *"ODOTTAA VAHVISTUSTA"*) ok "status: odottaa vahvistusta" ;;
-		*) bad "status väärin: $out" ;; esac
-	case "$out" in *"vahti:         käynnissä"*) ok "status: vahti käynnissä" ;;
-		*) bad "status ei näe vahtia: $out" ;; esac
+	case "$out" in *"PENDING CONFIRMATION"*) ok "status: pending confirmation" ;;
+		*) bad "status incorrect: $out" ;; esac
+	case "$out" in *"watchdog:     running"*) ok "status: watchdog running" ;;
+		*) bad "status fails to detect watchdog: $out" ;; esac
 	ts confirm >/dev/null 2>&1
 }
 
 case15() {
-	CASE="15 boottaus binäärinvaihdon ja vahdin virityksen välissä"; setup; say "$CASE"
+	CASE="15 boot between binary swap and watchdog setup"; setup; say "$CASE"
 	TS_TIMEOUT=120 ts run >/dev/null 2>&1
-	# simuloi: vahti ja määräaika eivät ehtineet levylle, vain pending
+	# simulate: watchdog and deadline didn't reach disk, only pending
 	kill "$(cat "$SB/state/watchdog.pid")" 2>/dev/null
 	rm -f "$SB/state/deadline" "$SB/state/watchdog.pid"
 	sleep 1
-	assert_file "odottava päivitys tiedossa" "$SB/state/pending"
+	assert_file "pending update recorded" "$SB/state/pending"
 	out="$(ts status 2>&1)"
-	case "$out" in *"jäi ilman vahtia"*) ok "status kertoo keskeneräisyydestä" ;;
-		*) bad "status ei huomaa: $out" ;; esac
+	case "$out" in *"without watchdog"*) ok "status reports incomplete state" ;;
+		*) bad "status fails to detect state: $out" ;; esac
 	out="$(TS_TIMEOUT=120 ts boot-check 2>&1)"
-	case "$out" in *"keskeytyi ennen vahdin viritystä"*) ok "boot-check tunnistaa tilanteen" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert "vanha versio takaisin" "$(installed_version)" "$OLD"
-	assert_nofile "tila siivottu" "$SB/state/pending"
+	case "$out" in *"interrupted before watchdog setup"*) ok "boot-check identifies situation" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert "old version restored" "$(installed_version)" "$OLD"
+	assert_nofile "state cleaned up" "$SB/state/pending"
 }
 
 case16() {
-	CASE="16 vahvistus samaan aikaan kun vahti palauttaa"; setup; say "$CASE"
+	CASE="16 confirm occurs simultaneously with watchdog rollback"; setup; say "$CASE"
 	TS_TIMEOUT=5 ts run >/dev/null 2>&1
-	assert "uusi versio asennettu" "$(installed_version)" "$NEW"
-	# odota kunnes vahti on tehnyt rollbackin, vahvista vasta sitten
+	assert "new version installed" "$(installed_version)" "$NEW"
+	# wait until watchdog completes rollback, confirm only then
 	i=0
 	while [ "$i" -lt 30 ] && [ -f "$SB/state/deadline" ]; do sleep 1; i=$((i + 1)); done
 	sleep 3
 	out="$(ts confirm 2>&1)"; rc=$?
-	assert "confirm ei valehtele onnistumisesta" "$rc" 0
-	case "$out" in *"Mitään ei odota vahvistusta"*|*"rollback ehti tapahtua"*)
-			ok "confirm kertoo todellisen tilan" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert "vanha versio voimassa" "$(installed_version)" "$OLD"
+	assert "confirm does not report false success" "$rc" 0
+	case "$out" in *"Nothing is pending confirmation"*|*"rollback occurred"*)
+			ok "confirm reports true state" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert "old version active" "$(installed_version)" "$OLD"
 }
 
 case17() {
-	CASE="17 vanhentunut watchdog.pid ei johda vieraan prosessin tappoon"; setup; say "$CASE"
+	CASE="17 stale watchdog.pid does not kill alien process"; setup; say "$CASE"
 	TS_TIMEOUT=120 ts run >/dev/null 2>&1
 	kill "$(cat "$SB/state/watchdog.pid")" 2>/dev/null
 	sleep 1
-	# boottauksen jälkeen PID viittaa johonkin aivan muuhun prosessiin
+	# post-boot PID points to another unrelated process
 	sleep 300 &
 	victim=$!
 	echo "$victim" > "$SB/state/watchdog.pid"
 	out="$(ts status 2>&1)"
-	case "$out" in *"vahti:         EI KÄYNNISSÄ"*) ok "status ei usko vierasta PID:iä vahdiksi" ;;
-		*) bad "status luuli vahtia eläväksi: $out" ;; esac
+	case "$out" in *"watchdog:     NOT RUNNING"*) ok "status rejects alien PID as watchdog" ;;
+		*) bad "status assumed alien PID was watchdog: $out" ;; esac
 	ts confirm >/dev/null 2>&1
 	sleep 1
-	if kill -0 "$victim" 2>/dev/null; then ok "vieras prosessi jäi henkiin"; else bad "disarm tappoi väärän prosessin"; fi
+	if kill -0 "$victim" 2>/dev/null; then ok "alien process spared"; else bad "disarm killed wrong process"; fi
 	kill "$victim" 2>/dev/null
 	wait "$victim" 2>/dev/null
 }
 
-# netinstall.sh ajetaan tyngällä latauskomennolla ja hiekkalaatikkoon
-# --prefixillä: mitään ei haeta verkosta eikä asenneta oikeaan juureen.
+# netinstall.sh run with stub download command and --prefix sandbox:
+# nothing fetched from net nor installed into host root filesystem.
 netinstall() {
 	env -i \
-		PATH="$SB/bin:/usr/bin:/bin" \
+		PATH="$SB/bin:/usr/bin:/bin:/sbin" \
 		HOME="$SB" \
-		BASE_URL="http://tynkä/repo" \
+		BASE_URL="http://stub/repo" \
 		sh "$SRC/netinstall.sh" --prefix "$SB/fakeroot" -w "$SB/bin/wget" "$@"
 }
 
 case18() {
-	CASE="18 netinstall GitHubista"; setup; say "$CASE"
+	CASE="18 netinstall from GitHub"; setup; say "$CASE"
 	cp "$SRC/ts-update" "$SRC/ts-update.default" "$SRC/ts-update-bootcheck.init" "$SB/www/"
 
 	out="$(netinstall 2>&1)"; rc=$?
-	assert "asennus onnistuu" "$rc" 0
-	assert_file "ts-update paikallaan" "$SB/fakeroot/usr/sbin/ts-update"
-	if [ -x "$SB/fakeroot/usr/sbin/ts-update" ]; then ok "ts-update on ajettava"; else bad "ei ajo-oikeutta"; fi
-	assert_file "boottitarkistus paikallaan" "$SB/fakeroot/etc/init.d/ts-update-bootcheck"
-	assert_file "asetustiedosto luotiin" "$SB/fakeroot/etc/default/ts-update"
-	case "$out" in *sha256*) ok "kertoo tarkistussumman" ;; *) bad "ei summaa: $out" ;; esac
+	assert "installation succeeds" "$rc" 0
+	assert_file "ts-update installed" "$SB/fakeroot/usr/sbin/ts-update"
+	if [ -x "$SB/fakeroot/usr/sbin/ts-update" ]; then ok "ts-update is executable"; else bad "lacks execute permission"; fi
+	assert_file "boot check script installed" "$SB/fakeroot/etc/init.d/ts-update-bootcheck"
+	assert_file "config file created" "$SB/fakeroot/etc/default/ts-update"
+	case "$out" in *sha256*) ok "reports checksum" ;; *) bad "missing checksum: $out" ;; esac
 
-	# laitekohtaiset asetukset eivät saa hävitä uudelleenasennuksessa
+	# device settings must not be lost on reinstall
 	echo "PEER=100.64.0.1" >> "$SB/fakeroot/etc/default/ts-update"
 	netinstall >/dev/null 2>&1
 	if grep -q '^PEER=100.64.0.1' "$SB/fakeroot/etc/default/ts-update"; then
-		ok "asetuksia ei ylikirjoiteta"
+		ok "settings preserved"
 	else
-		bad "asetustiedosto ylikirjoitettiin"
+		bad "config file was overwritten"
 	fi
 
-	# oikea tarkistussumma kelpaa, väärä ei
+	# correct checksum accepted, incorrect rejected
 	sum="$(sha256sum "$SRC/ts-update" | awk '{print $1}')"
 	netinstall -c "$sum" >/dev/null 2>&1
-	assert "oikea tarkistussumma kelpaa" "$?" 0
+	assert "correct checksum accepted" "$?" 0
 	out="$(netinstall -c 0000000000000000000000000000000000000000000000000000000000000000 2>&1)"; rc=$?
-	assert "väärä tarkistussumma torjutaan" "$rc" 1
-	case "$out" in *"ei täsmää"*) ok "kertoo summavirheestä" ;; *) bad "väärä viesti: $out" ;; esac
+	assert "incorrect checksum rejected" "$rc" 1
+	case "$out" in *"checksum mismatch"*) ok "reports checksum mismatch" ;; *) bad "unexpected output: $out" ;; esac
 
-	# odottava päivitys estää asennuksen ilman --forcea
+	# pending update prevents install without --force
 	mkdir -p "$SB/fakeroot/root/ts-update"
 	echo "1.98.3 -> 1.100.0" > "$SB/fakeroot/root/ts-update/pending"
 	out="$(netinstall 2>&1)"; rc=$?
-	assert "odottava päivitys estää asennuksen" "$rc" 1
-	case "$out" in *"odottaa yhä vahvistusta"*) ok "kertoo syyn" ;; *) bad "väärä viesti: $out" ;; esac
+	assert "pending update blocks install" "$rc" 1
+	case "$out" in *"still pending confirmation"*) ok "reports reason" ;; *) bad "unexpected output: $out" ;; esac
 	netinstall --force >/dev/null 2>&1
-	assert "--force ohittaa eston" "$?" 0
+	assert "--force overrides block" "$?" 0
 	rm -f "$SB/fakeroot/root/ts-update/pending"
 
-	# katkennut lataus ei saa päätyä asennukseen
-	cp "$SB/fakeroot/usr/sbin/ts-update" "$SB/ts-update.ehja"
+	# truncated download must not be installed
+	cp "$SB/fakeroot/usr/sbin/ts-update" "$SB/ts-update.good"
 	head -c 400 "$SRC/ts-update" > "$SB/www/ts-update"
 	out="$(netinstall 2>&1)"; rc=$?
-	assert "kommenttiotsakkeeseen katkennut lataus torjutaan" "$rc" 1
-	case "$out" in *katkennut*) ok "kertoo syyn" ;; *) bad "väärä viesti: $out" ;; esac
+	assert "download truncated in header rejected" "$rc" 1
+	case "$out" in *truncated*) ok "reports reason" ;; *) bad "unexpected output: $out" ;; esac
 	head -c 9000 "$SRC/ts-update" > "$SB/www/ts-update"
 	out="$(netinstall 2>&1)"; rc=$?
-	assert "keskeltä katkennut lataus torjutaan" "$rc" 1
-	if cmp -s "$SB/ts-update.ehja" "$SB/fakeroot/usr/sbin/ts-update"; then
-		ok "vanha versio jäi koskematta"
+	assert "download truncated mid-file rejected" "$rc" 1
+	if cmp -s "$SB/ts-update.good" "$SB/fakeroot/usr/sbin/ts-update"; then
+		ok "previous version left untouched"
 	else
-		bad "rikkinäinen versio asennettiin"
+		bad "corrupted version was installed"
 	fi
 
-	# poisto jättää asetukset ja tilan rauhaan
+	# uninstall preserves config and state
 	netinstall --uninstall >/dev/null 2>&1
-	assert_nofile "ts-update poistettu" "$SB/fakeroot/usr/sbin/ts-update"
-	assert_nofile "boottitarkistus poistettu" "$SB/fakeroot/etc/init.d/ts-update-bootcheck"
-	assert_file "asetukset jäivät" "$SB/fakeroot/etc/default/ts-update"
+	assert_nofile "ts-update uninstalled" "$SB/fakeroot/usr/sbin/ts-update"
+	assert_nofile "boot check script uninstalled" "$SB/fakeroot/etc/init.d/ts-update-bootcheck"
+	assert_file "config preserved" "$SB/fakeroot/etc/default/ts-update"
 }
 
 case19() {
-	CASE="19 feedin symlink-asettelu"; setup; say "$CASE"
-	# feedin paketti asentaa tailscalen symlinkkinä tailscalediin
+	CASE="19 feed symlink layout"; setup; say "$CASE"
+	# feed package installs tailscale as symlink to tailscaled
 	rm -f "$SB/sbin/tailscale"
 	ln -s tailscaled "$SB/sbin/tailscale"
 
 	TS_TIMEOUT=120 ts run >/dev/null 2>&1
-	assert "uusi versio asennettu" "$(installed_version)" "$NEW"
-	assert_file "symlinkki tallennettiin linkkinä" "$SB/backup/tailscale.link"
-	assert_nofile "samaa binääriä ei pakattu kahdesti" "$SB/backup/tailscale.gz"
-	assert "linkin kohde talteen" "$(cat "$SB/backup/tailscale.link")" "tailscaled"
+	assert "new version installed" "$(installed_version)" "$NEW"
+	assert_file "symlink target saved" "$SB/backup/tailscale.link"
+	assert_nofile "binary not gzipped twice" "$SB/backup/tailscale.gz"
+	assert "link target preserved" "$(cat "$SB/backup/tailscale.link")" "tailscaled"
 	if [ -L "$SB/sbin/tailscale" ]; then
-		bad "päivityksen jälkeen pitäisi olla oikea binääri"
+		bad "after update target should be an actual binary"
 	else
-		ok "päivitys korvasi symlinkin binäärillä"
+		ok "update replaced symlink with binary"
 	fi
 
 	ts rollback >/dev/null 2>&1
 	if [ -L "$SB/sbin/tailscale" ]; then
-		ok "rollback palautti symlinkin"
+		ok "rollback restored symlink"
 	else
-		bad "rollback jätti oikean tiedoston symlinkin tilalle"
+		bad "rollback left real binary instead of symlink"
 	fi
-	assert "linkki osoittaa oikeaan" "$(readlink "$SB/sbin/tailscale")" "tailscaled"
-	assert "vanha versio takaisin" "$(installed_version)" "$OLD"
+	assert "link points to correct binary" "$(readlink "$SB/sbin/tailscale")" "tailscaled"
+	assert "old version restored" "$(installed_version)" "$OLD"
 }
 
 case20() {
-	CASE="20 asennuskohteessa ei ole tilaa"; setup; say "$CASE"
-	# df-tynkä: asennuskohde näyttää täydeltä, muut polut oikealta df:ltä
+	CASE="20 low space at target location"; setup; say "$CASE"
+	# df stub: target path looks full, other paths use host df
 	cat > "$SB/bin/df" <<EOF
 #!/bin/sh
 [ "\$1" = --stub-check ] && { echo stub; exit 0; }
@@ -564,59 +563,59 @@ EOF
 	chmod 755 "$SB/bin/df"
 
 	if [ "$(env -i PATH="$SB/bin:/usr/bin:/bin" "$TS_SH" -c 'df --stub-check' 2>/dev/null)" != stub ]; then
-		say "  ohitettu (kuori ajaa oman df-appletinsa PATHin ohi)"
+		say "  skipped (shell executes own df applet overriding PATH)"
 		return 0
 	fi
 
 	out="$(ts run 2>&1)"; rc=$?
-	assert "poistuu virheellä" "$rc" 1
-	case "$out" in *"ei ole tilaa uusille binääreille"*) ok "kertoo syyn" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	assert_nofile "mitään ei ladattu" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
-	assert_nofile "ei varmuuskopiota" "$SB/backup/tailscaled.gz"
-	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
-	assert_file "daemon jätettiin rauhaan" "$SB/daemon.pid"
+	assert "exits with error" "$rc" 1
+	case "$out" in *"no space in target location"*) ok "reports reason" ;;
+		*) bad "unexpected output: $out" ;; esac
+	assert_nofile "nothing downloaded" "$SB/tmp/tailscale_${NEW}_${ARCH}.tgz"
+	assert_nofile "no backup created" "$SB/backup/tailscaled.gz"
+	assert "binary not modified" "$(installed_version)" "$OLD"
+	assert_file "daemon untouched" "$SB/daemon.pid"
 }
 
 case21() {
-	CASE="21 kellon hyppy ei katkaise vahvistusikkunaa"; setup; say "$CASE"
+	CASE="21 clock jump does not interrupt confirmation window"; setup; say "$CASE"
 	TS_TIMEOUT=60 ts run >/dev/null 2>&1
-	assert "uusi versio asennettu" "$(installed_version)" "$NEW"
-	assert_file "monotoninen määräaika kirjattu" "$SB/state/deadline.uptime"
+	assert "new version installed" "$(installed_version)" "$NEW"
+	assert_file "monotonic deadline recorded" "$SB/state/deadline.uptime"
 
-	# simuloi tunnin ntp-hyppyä eteenpäin: seinäkellon määräaika on jo mennyt
+	# simulate 1-hour NTP forward jump: wall clock deadline passed
 	echo "$(( $(date +%s) - 3600 ))" > "$SB/state/deadline"
 	sleep 12
-	assert "vahti ei palauttanut" "$(installed_version)" "$NEW"
-	assert_file "vahvistusikkuna yhä auki" "$SB/state/deadline"
+	assert "watchdog did not rollback" "$(installed_version)" "$NEW"
+	assert_file "confirmation window still active" "$SB/state/deadline"
 
-	# ilman monotonista laskuria palataan seinäkelloon, jolloin rollback tulee
+	# without monotonic counter, fallback to wall clock triggers rollback
 	rm -f "$SB/state/deadline.uptime"
 	i=0
 	while [ "$i" -lt 30 ] && [ -f "$SB/state/deadline" ]; do sleep 1; i=$((i + 1)); done
 	sleep 2
-	assert "seinäkello toimii varapolkuna" "$(installed_version)" "$OLD"
+	assert "wall clock serves as fallback" "$(installed_version)" "$OLD"
 }
 
 case22() {
-	CASE="22 työhakemisto puuttuu"; setup; say "$CASE"
-	# asetuksissa osoitettu hakemisto, jota ei ole vielä luotu
+	CASE="22 missing work directory"; setup; say "$CASE"
+	# configured path directory not created yet
 	rm -rf "$SB/tmp"
 	out="$(ts check 2>&1)"
-	case "$out" in *"$NEW"*) ok "check luo työhakemiston itse" ;;
-		*) bad "check ei toipunut puuttuvasta hakemistosta: $out" ;; esac
-	assert_file "hakemisto luotiin" "$SB/tmp"
+	case "$out" in *"$NEW"*) ok "check creates work directory" ;;
+		*) bad "check failed to recover from missing directory: $out" ;; esac
+	assert_file "directory created" "$SB/tmp"
 
-	# hakemisto, jota ei voi luoda: virheen pitää kertoa syy
-	out="$(TS_TMP_DIR=/proc/ts-update-ei-onnistu ts check 2>&1)"
-	case "$out" in *"työhakemistoon ei voi kirjoittaa"*) ok "kertoo syyn" ;;
-		*) bad "väärä viesti: $out" ;; esac
-	case "$out" in *"EI SAATU"*) ok "check ei väitä tietävänsä versiota" ;;
-		*) bad "check väitti jotain muuta: $out" ;; esac
+	# uncreateable directory: error must report reason
+	out="$(TS_TMP_DIR=/proc/ts-update-uncreateable ts check 2>&1)"
+	case "$out" in *"cannot write to working directory"*) ok "reports reason" ;;
+		*) bad "unexpected output: $out" ;; esac
+	case "$out" in *"FAILED TO FETCH"*) ok "check does not claim to know version" ;;
+		*) bad "check reported unexpected text: $out" ;; esac
 
-	out="$(TS_TMP_DIR=/proc/ts-update-ei-onnistu ts run 2>&1)"; rc=$?
-	assert "run keskeytyy" "$rc" 1
-	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
+	out="$(TS_TMP_DIR=/proc/ts-update-uncreateable ts run 2>&1)"; rc=$?
+	assert "run aborts" "$rc" 1
+	assert "binary not modified" "$(installed_version)" "$OLD"
 }
 
 run_suite() {
@@ -627,27 +626,27 @@ run_suite() {
 }
 
 for _need in sha256sum tar gzip awk sed; do
-	command -v "$_need" >/dev/null 2>&1 || { say "puuttuu: $_need"; exit 1; }
+	command -v "$_need" >/dev/null 2>&1 || { say "missing dependency: $_need"; exit 1; }
 done
 
 mkdir -p "$ROOT"
 
-say "== suite: sed-varapolku (ei jsonfilteriä)"
+say "== suite: sed fallback path (no jsonfilter)"
 USE_JSONFILTER=0
 run_suite
 
 if command -v python3 >/dev/null 2>&1; then
 	say ""
-	say "== suite: jsonfilter-tynkä"
+	say "== suite: jsonfilter stub path"
 	USE_JSONFILTER=1
 	run_suite
 else
 	say ""
-	say "(python3 puuttuu — jsonfilter-polkua ei testattu)"
+	say "(python3 missing — jsonfilter path not tested)"
 fi
 
 say ""
-say "läpi: $PASS, virheitä: $FAIL"
+say "passed: $PASS, failed: $FAIL"
 if [ "$FAIL" -gt 0 ]; then
 	printf '%s\n' "$FAILED"
 	exit 1

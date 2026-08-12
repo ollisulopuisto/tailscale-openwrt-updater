@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Riisuttu jsonfilter testejä varten.
+"""Stripped-down jsonfilter for tests.
 
-Toteuttaa vain sen, mitä ts-update käyttää: -i FILE / stdin, -e '@.Avain'
-ja -e '@.Avain[*]'. Oikea jsonfilter (libubox) osaa paljon enemmän, mutta
-tämä riittää varmistamaan, että skripti toimii myös jsonfilter-polulla.
+Implements only what ts-update uses: -i FILE / stdin, -e '@.Key'
+and -e '@.Key[*]'. The real jsonfilter (libubox) does much more, but
+this is enough to verify the script also works via the jsonfilter path.
 """
 import json
 import re
