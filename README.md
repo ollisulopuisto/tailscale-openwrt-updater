@@ -52,7 +52,7 @@ vahvistusikkuna, jota ei kannata sotkea.
 
 Version voi kiinnittää ja tarkistussumman vaatia:
 
-    sh /tmp/netinstall.sh --ref v1.0 --sha256 <summa>
+    sh /tmp/netinstall.sh --ref v1.0.0 --sha256 <summa>
 
 Poisto (asetukset, tila ja varmuuskopiot jäävät):
 

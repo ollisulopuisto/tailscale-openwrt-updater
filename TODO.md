@@ -11,14 +11,24 @@ Tausta ja käyttöohjeet: ks. [README.md](README.md).
 
 ## Nykytila
 
-Ajossa yhdellä reitittimellä (aarch64, OpenWrt 25.12.5). Toiminnot:
-`check`, `run [--dry-run]`, `confirm`, `rollback`, `status`, `boot-check`,
-sisäinen `_watchdog`. Varmuuskopio `/root/ts-backup/*.gz`, odottava tila
-`/root/ts-update/`, vahti irrotettu istunnosta `setsid`illä.
+Versio 1.0.0. Ajossa kahdella reitittimellä:
 
-Repossa myös `install.sh` (monen laitteen asennus), `ts-update-bootcheck.init`
-(boottitarkistus), `ts-update.default` (asetusmalli) ja `tests/run-tests.sh`
-(testimatriisi hiekkalaatikossa, ei vaadi oikeaa laitetta).
+- **aarch64**, OpenWrt 25.12.5 — tavallinen asennus, päivitykset vahtineen.
+- **ramips/mt7621** (`mipsel_24kc` → `mipsle`), 16 MB flash — binäärit
+  USB-levyllä ja `/usr/sbin`:issä symlinkit, koska ylävirran 70 MB ei mahdu
+  flashiin. `SBIN_DIR`, `BACKUP_DIR` ja `TMP_DIR` osoitettu levylle,
+  `STATE_DIR` jätetty flashiin.
+
+Toiminnot: `check`, `run [--dry-run]`, `confirm`, `rollback`, `status`,
+`boot-check`, sisäinen `_watchdog`. Varmuuskopio `$BACKUP_DIR/*.gz`,
+odottava tila `$STATE_DIR`, vahti irrotettu istunnosta `setsid`illä ja
+määräaika mitattuna monotonisesta `/proc/uptime`-laskurista.
+
+Repossa myös `netinstall.sh` (asennus laitteella suoraan GitHubista),
+`install.sh` (monen laitteen asennus työasemalta), `ts-update-bootcheck.init`,
+`ts-update.default` ja `tests/run-tests.sh` (22 testitapausta
+hiekkalaatikossa, ei vaadi oikeaa laitetta). CI ajaa shellcheckin ja
+testimatriisin sekä dashilla että busybox ashilla.
 
 ## Tehdyt tehtävät
 
