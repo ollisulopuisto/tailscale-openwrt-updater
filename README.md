@@ -157,15 +157,32 @@ ole, käytetään sed-varapolkua.
 
 ## Pienen flashin laitteet (16 MB)
 
-Ylävirran binäärit ovat purettuna isot: `tailscaled` ~29 MB ja erillinen
-`tailscale` ~14 MB, eli noin **45 MB** asennuskohteeseen. Feedin paketti
-mahtuu, koska se on imagessa squashfs-pakattuna (~10 MB) ja koska siinä
-CLI on käännetty daemoniin mukaan — `/usr/sbin/tailscale` on symlinkki
-`tailscaled`iin.
+Ylävirran binäärit ovat purettuna isot. Mitattu 1.102.2 / mipsle:
 
-Esimerkki laitteesta, jolla tämä ei onnistu (ramips/mt7621, 16 MB flash):
+| | koko |
+|---|---|
+| `tailscaled` | 38.7 MiB |
+| `tailscale` | 31.7 MiB |
+| **yhteensä asennuskohteeseen** | **70.4 MiB** |
+| tarballi (lataus) | 32.3 MiB |
+| purku + tarballi yhtä aikaa `/tmp`:ssä | ~103 MiB |
 
-    /overlay   16.0M  vapaana 14.7M      tarve ~45M
+Vertailun vuoksi feedin binääri samalla laitteella on **29.1 MiB** — yksi
+tiedosto, jossa CLI on käännetty daemoniin mukaan (`/usr/sbin/tailscale`
+on symlinkki `tailscaled`iin), ja imagessa se on vielä squashfs-pakattuna
+noin 10 MB:iin. Siksi feedin versio mahtuu sinne minne ylävirran ei ole
+mitään asiaa.
+
+Esimerkki laitteesta, jolla tämä ei onnistu (ramips/mt7621, 16 MB flash,
+128 MB RAM):
+
+    /overlay   16.0M  vapaana 14.7M      tarve 70.4M
+    tmpfs      58.0M  vapaana 57.6M      tarve 103M (lataus + purku)
+
+**Älä yritä väistää tätä `/tmp`:n kautta.** `tmpfs` on RAMia: binäärien
+kopiointi sinne pienimuistisella laitteella syö muistin ja kaataa
+reitittimen. Tämä on testattu — laite bootasi kesken kopion. Lataa ja pura
+aina USB-levyllä, älä `/tmp`:ssä.
 
 `ts-update check` kertoo tilanteen suoraan, ja `ts-update run` keskeytyy
 ennen kuin mitään on ladattu. Vaihtoehdot:

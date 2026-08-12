@@ -110,10 +110,11 @@ LOCK_DIR_HELD=""
 # /tmp:ssä näyttäisi vanhaa versiolistaa seuraavallakin ajolla.
 JSON_CACHE="$TMP_DIR/ts-update.stable.$$.json"
 
-# Alaraja työtilalle ennen latausta, kilotavuina. Tarkka vaatimus
-# lasketaan vasta kun tarballin todellinen koko tiedetään; tämä on vain
+# Alaraja työtilalle ennen latausta, kilotavuina. Mitattu: 1.102.2 mipsle
+# -tarballi on 32.3 MiB, joten pelkkä lataus vaatii sen verran. Tarkka
+# vaatimus lasketaan vasta kun tarballin koko tiedetään; tämä on vain
 # karkea seula, joka torjuu tyystin liian pienen /tmp:n heti.
-NEED_TMP_KIB=24576
+NEED_TMP_KIB=40960
 LOG_MAX_BYTES=262144
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -460,10 +461,14 @@ backup_binaries() {
 
 # Karkea arvio siitä, paljonko uudet binäärit vievät asennuskohteessa.
 # Ylävirran tarballissa on kaksi erillistä binääriä siinä missä feedin
-# asennuksessa on yksi binääri ja symlinkki, joten nykyisen tailscaledin
-# koko on turvallinen alaraja — se riittää torjumaan pienimuistiset
-# laitteet ennen kuin mitään on ladattu.
-install_floor_kib() { file_kib "$SBIN_DIR/tailscaled"; }
+# asennuksessa on yksi binääri ja symlinkki, ja ylävirran binäärit ovat
+# vielä isompia kuin OpenWrt:n koko-optimoitu käännös: mitattu 1.102.2
+# mipsle = tailscaled 38.7 MiB + tailscale 31.7 MiB = 70.4 MiB, kun
+# feedin yhdistetty binääri on 29.1 MiB. Kaksinkertainen nykyinen koko
+# on siis yhä aliarvio, mutta riittää torjumaan pienen flashin laitteet
+# ennen kuin mitään on ladattu; tarkka tarkistus tehdään install_from:issa
+# purettujen tiedostojen todellisista koista.
+install_floor_kib() { echo "$(( $(file_kib "$SBIN_DIR/tailscaled") * 2 ))"; }
 
 # Tarkistaa että puretut binäärit ovat olemassa ja käynnistyvät tällä
 # laitteella. Tehdään ennen kuin palvelua pysäytetään: väärä
@@ -704,9 +709,10 @@ cmd_run() {
 	fi
 	log "tarkistussumma ok"
 
-	# Nyt tarballin koko tiedetään: purettuna binäärit vievät noin
-	# kolminkertaisesti, ja tarballi itse jää levylle purun ajaksi.
-	need_space "$TMP_DIR" "$(( $(file_kib "$tgz") * 4 ))" "purku" || {
+	# Nyt tarballin koko tiedetään. Mitattu suhde (1.102.2 mipsle): 32.3
+	# MiB pakattuna, 70.4 MiB purettuna, ja tarballi jää levylle purun
+	# ajaksi — yhteensä 3.2-kertaisesti. 3.5 antaa pienen marginaalin.
+	need_space "$TMP_DIR" "$(( $(file_kib "$tgz") * 7 / 2 ))" "purku" || {
 		rm -f "$tgz" "$sha"
 		exit 1
 	}
