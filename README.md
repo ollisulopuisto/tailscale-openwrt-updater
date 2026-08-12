@@ -308,6 +308,19 @@ ajetaan kahdesti, jos `python3` löytyy: kerran sed-varapolulla ja kerran
 | Feedin symlink-asettelu | varmuuskopio linkkinä, rollback palauttaa symlinkin | 19 |
 | Asennuskohde täynnä | keskeytys ennen latausta | 20 |
 
-Testaamatta oikealla laitteella: `mipsle`, `mips`, `mips64`, `arm`,
-`amd64`, `386`, `riscv64`. Ajossa: aarch64 / OpenWrt 25.12.5.
-`ts-update check` kertoo heti, osuiko arkkitehtuurin tunnistus oikeaan.
+### Todettu oikealla laitteella
+
+| Arkkitehtuuri | Laite | Tulos |
+|---|---|---|
+| `arm64` | aarch64 / OpenWrt 25.12.5 | ts-update ajossa, päivitykset vahtineen |
+| `mipsle` | ramips/mt7621, `DISTRIB_ARCH=mipsel_24kc` | ylävirran binääri toimii, `detect_arch` osuu oikeaan |
+
+`mipsle`-laitteella binäärit ajetaan USB-levyltä symlinkkien takaa (ks.
+edellä): 16 MB:n flashiin ne eivät mahdu, mutta itse binääri nousi
+pystyyn ja liittyi tailnetiin normaalisti (`Starting -> Running`,
+`--state /etc/tailscale/tailscaled.state` luettiin, ei uudelleen­
+autentikointia). Muistinkulutus 31 MiB RSS 116 MiB:n laitteella.
+
+Testaamatta yhä: `mips`, `mips64`, `mips64le`, `arm`, `amd64`, `386`,
+`riscv64`. `ts-update check` kertoo heti, osuiko arkkitehtuurin
+tunnistus oikeaan, ja väärä arvaus torjutaan ennen latausta.

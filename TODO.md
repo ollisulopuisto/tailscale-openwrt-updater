@@ -82,10 +82,16 @@ asennuksen, käytön ja erikseen sen, mitä skripti EI suojaa.
 
 ## Jäljellä
 
-- **Muut arkkitehtuurit testaamatta oikealla laudalla**: `mipsle`, `mips`,
-  `mips64`, `arm`, `amd64`, `386`, `riscv64`. `detect_arch()`in osuma
-  näkyy heti `ts-update check`istä, ja väärä arvaus torjutaan ennen
-  latausta, mutta itse päivitys on ajettu läpi vain arm64:llä.
+- **Muut arkkitehtuurit testaamatta oikealla laudalla**: `mips`,
+  `mips64`, `mips64le`, `arm`, `amd64`, `386`, `riscv64`.
+  `detect_arch()`in osuma näkyy heti `ts-update check`istä, ja väärä
+  arvaus torjutaan ennen latausta.
+  - `arm64`: ajossa, päivitykset vahtineen.
+  - `mipsle`: todettu ramips/mt7621:llä (`DISTRIB_ARCH=mipsel_24kc`).
+    Ylävirran binääri nousee pystyyn ja liittyy tailnetiin, mutta
+    laitteen 16 MB:n flashiin se ei mahdu — binäärit ajetaan USB:ltä
+    symlinkkien takaa, jolloin ts-update toimii `SBIN_DIR`in kautta.
+    Itse ts-updaten päivityskierrosta ei ole vielä ajettu siellä läpi.
 - **Boottitarkistus testattu vain hiekkalaatikossa** (testit 11 ja 12).
   Oikea uudelleenkäynnistys kesken vahvistusikkunan on vielä ajamatta.
 - **apk-paketin päivitys** palauttaa feedin binäärit `/usr/sbin`:iin.
