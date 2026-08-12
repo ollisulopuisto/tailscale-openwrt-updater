@@ -143,7 +143,10 @@ Polut `STATE_DIR`, `BACKUP_DIR`, `SBIN_DIR`, `INIT_SCRIPT`, `TMP_DIR`,
    mainostetut reitit samat kuin ennen päivitystä, ja valinnainen
    `tailscale ping PEER`. Epäonnistuminen palauttaa vanhan version heti.
 7. **Vahti** (`setsid`illä irrotettu taustaprosessi) palauttaa vanhan
-   version, ellei `confirm` tule määräajassa.
+   version, ellei `confirm` tule määräajassa. Määräaikaa mitataan
+   monotonisesta `/proc/uptime`-laskurista, joten ntp:n askel ei katkaise
+   vahvistusikkunaa kesken kaiken; seinäkellon aikaleima on varapolku,
+   joka kestää uudelleenkäynnistyksen.
 8. **Boottitarkistus**: odottava päivitys tallennetaan `/root`iin, ja
    `/etc/init.d/ts-update-bootcheck` jatkaa vahtia jäljellä olevalla
    ajalla tai tekee rollbackin, jos daemon ei noussut tai määräaika ehti
@@ -311,6 +314,8 @@ ajetaan kahdesti, jos `python3` löytyy: kerran sed-varapolulla ja kerran
 | `netinstall.sh` GitHubista | asentaa, ei ylikirjoita asetuksia, torjuu katkenneen latauksen | 18 |
 | Feedin symlink-asettelu | varmuuskopio linkkinä, rollback palauttaa symlinkin | 19 |
 | Asennuskohde täynnä | keskeytys ennen latausta | 20 |
+| Kellon hyppy vahvistusikkunassa | ei ennenaikaista rollbackia | 21 |
+| Työhakemisto puuttuu | luodaan itse, virhe kertoo syyn | 22 |
 
 ### Todettu oikealla laitteella
 

@@ -100,6 +100,7 @@ setting BASE_URL https://pkgs.tailscale.com/stable
 setting WGET wget
 
 DEADLINE_FILE="$STATE_DIR/deadline"
+UPTIME_FILE="$STATE_DIR/deadline.uptime"
 PENDING_FILE="$STATE_DIR/pending"
 WATCHDOG_PID="$STATE_DIR/watchdog.pid"
 EXPECT_ROUTES="$STATE_DIR/expect.routes"
@@ -118,12 +119,16 @@ NEED_TMP_KIB=40960
 LOG_MAX_BYTES=262144
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
+mkdir -p "$TMP_DIR" 2>/dev/null || true
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Konsolikopio menee stderriin, ei stdoutiin: latest_version ja
+# tarball_list ajetaan $( ):n sisällä, ja stdoutiin kirjoitettu
+# lokirivi päätyisi niiden paluuarvoksi.
 log() {
 	_msg="$(date '+%F %T') $*"
-	echo "$_msg"
+	echo "$_msg" >&2
 	if [ -d "$STATE_DIR" ]; then
 		echo "$_msg" >> "$LOG" 2>/dev/null || true
 		_sz="$(wc -c < "$LOG" 2>/dev/null || echo 0)"
@@ -268,6 +273,12 @@ need_space() {  # need_space <polku> <KiB> <selite>
 # ei mitään.
 fetch_stable_json() {
 	[ -s "$JSON_CACHE" ] && return 0
+	# Työhakemisto voi olla asetuksissa osoitettu levylle, jota ei ole
+	# luotu. Ilman tätä lataus epäonnistuisi kertomatta miksi.
+	if ! mkdir -p "$TMP_DIR" 2>/dev/null || [ ! -w "$TMP_DIR" ]; then
+		log "VIRHE: työhakemistoon ei voi kirjoittaa: $TMP_DIR"
+		return 1
+	fi
 	if ! "$WGET" -q -T 30 -O "$JSON_CACHE" "$BASE_URL/?mode=json" 2>/dev/null; then
 		rm -f "$JSON_CACHE"
 		return 1
@@ -565,36 +576,78 @@ disarm() {
 	if watchdog_alive; then
 		kill "$(cat "$WATCHDOG_PID" 2>/dev/null)" 2>/dev/null
 	fi
-	rm -f "$WATCHDOG_PID" "$DEADLINE_FILE" "$PENDING_FILE"
+	rm -f "$WATCHDOG_PID" "$DEADLINE_FILE" "$UPTIME_FILE" "$PENDING_FILE"
 	sync
 }
 
 # Vahti irrotetaan istunnosta, jotta se elää ssh-yhteyden katkettua.
 # 9>&- sulkee periytyvän lukkokahvan: muuten lapsi pitäisi lukkoa
-# koko vahvistusikkunan ajan. Vakiotuloste menee /dev/nulliin, koska
-# log() kirjoittaa lokitiedostoon jo itse.
+# koko vahvistusikkunan ajan. log() kirjoittaa lokitiedostoon jo itse,
+# joten vain odottamaton stderr ohjataan erilliseen tiedostoon.
 spawn_watchdog() {
 	_secs="$1"
 	if have setsid; then
 		TIMEOUT="$_secs" ARCH="$ARCH" PEER="$PEER" IFACE="$IFACE" \
 		CHECK_ROUTES="$CHECK_ROUTES" HEALTH_WAIT="$HEALTH_WAIT" \
-			setsid "$0" _watchdog >/dev/null 2>>"$LOG" < /dev/null 9>&- &
+			setsid "$0" _watchdog >/dev/null 2>>"$LOG.stderr" < /dev/null 9>&- &
 	else
 		TIMEOUT="$_secs" ARCH="$ARCH" PEER="$PEER" IFACE="$IFACE" \
 		CHECK_ROUTES="$CHECK_ROUTES" HEALTH_WAIT="$HEALTH_WAIT" \
-			nohup "$0" _watchdog >/dev/null 2>>"$LOG" < /dev/null 9>&- &
+			nohup "$0" _watchdog >/dev/null 2>>"$LOG.stderr" < /dev/null 9>&- &
 	fi
 	echo $! > "$WATCHDOG_PID"
 	sync
 }
 
+# Sekunteja käynnistyksestä. Monotoninen: ntp:n askel ei siirrä tätä.
+uptime_now() {
+	[ -r /proc/uptime ] || return 1
+	read -r _u _rest < /proc/uptime || return 1
+	_u="${_u%%.*}"
+	case "$_u" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	echo "$_u"
+}
+
+# Määräaika kirjataan kahdesti: monotonisena käynnistyksen jälkeisenä
+# hetkenä ja seinäkellon aikaleimana. Ensimmäinen kestää kellon hypyn,
+# jälkimmäinen kestää uudelleenkäynnistyksen.
+write_deadlines() {
+	_secs="$1"
+	echo "$(( $(date +%s) + _secs ))" > "$DEADLINE_FILE"
+	rm -f "$UPTIME_FILE"
+	if _up="$(uptime_now)"; then
+		echo "$(( _up + _secs ))" > "$UPTIME_FILE"
+	fi
+	sync
+}
+
 arm_watchdog() {
 	_secs="${1:-$TIMEOUT}"
-	echo "$(( $(date +%s) + _secs ))" > "$DEADLINE_FILE"
+	write_deadlines "$_secs"
 	spawn_watchdog "$_secs"
 }
 
+# Ilman monotonista laskuria tunnin ntp-hyppy eteenpäin päättäisi
+# vahvistusikkunan kesken kaiken ja palauttaisi toimivan päivityksen.
+# Havaittu oikealla laitteella, jossa ei ole RTC:tä.
 deadline_left() {
+	if _up="$(uptime_now)" && [ -f "$UPTIME_FILE" ]; then
+		_ud="$(cat "$UPTIME_FILE" 2>/dev/null)"
+		case "$_ud" in
+			''|*[!0-9]*) _ud="" ;;
+		esac
+		if [ -n "$_ud" ]; then
+			_left=$(( _ud - _up ))
+			# Jäljellä ei voi olla enempää kuin koko ikkuna. Jos on,
+			# tiedosto on edelliseltä boottikerralta ja uptime nollautui.
+			if [ "$_left" -le "$TIMEOUT" ]; then
+				echo "$_left"
+				return 0
+			fi
+		fi
+	fi
 	_dl="$(cat "$DEADLINE_FILE" 2>/dev/null)"
 	case "$_dl" in
 		''|*[!0-9]*) echo 0; return 1 ;;
@@ -608,7 +661,11 @@ cmd_check() {
 	echo "arkkitehtuuri: ${ARCH:-TUNTEMATON}"
 	echo "nykyinen:      $(current_version)"
 	_new="$(latest_version)"
-	echo "uusin:         ${_new:-EI SAATU}"
+	if [ -n "$_new" ]; then
+		echo "uusin:         $_new"
+	else
+		echo "uusin:         EI SAATU — verkko tai $TMP_DIR? ks. $LOG"
+	fi
 	if [ -n "$_new" ] && [ -n "$ARCH" ]; then
 		if tarball_available "$_new" "$ARCH"; then
 			echo "paketti:       tailscale_${_new}_${ARCH}.tgz"
@@ -847,7 +904,7 @@ cmd_watchdog() {
 		exit 0
 	fi
 	do_rollback
-	rm -f "$WATCHDOG_PID" "$DEADLINE_FILE" "$PENDING_FILE"
+	rm -f "$WATCHDOG_PID" "$DEADLINE_FILE" "$UPTIME_FILE" "$PENDING_FILE"
 	sync
 }
 
@@ -875,7 +932,6 @@ cmd_boot_check() {
 	# vahvistusaikaa pidemmäksi.
 	if [ "$_left" -gt "$TIMEOUT" ]; then
 		_left="$TIMEOUT"
-		echo "$(( $(date +%s) + _left ))" > "$DEADLINE_FILE"
 	fi
 	log "boot-check: vahvistamaton päivitys kesken ($(cat "$PENDING_FILE" 2>/dev/null))"
 
@@ -892,6 +948,9 @@ cmd_boot_check() {
 		exit 0
 	fi
 	log "boot-check: viritetään vahti uudelleen ${_left} s:ksi"
+	# Uptime nollautui boottauksessa, joten molemmat määräajat
+	# kirjoitetaan uusiksi jäljellä olevan ajan mukaan.
+	write_deadlines "$_left"
 	spawn_watchdog "$_left"
 }
 

@@ -173,7 +173,7 @@ ts() {
 		SBIN_DIR="$SB/sbin" \
 		INIT_SCRIPT="$SB/bin/init-tailscale" \
 		LOCK_FILE="$SB/lock" \
-		TMP_DIR="$SB/tmp" \
+		TMP_DIR="${TS_TMP_DIR:-$SB/tmp}" \
 		BASE_URL="http://tynkä/stable" \
 		WGET="$SB/bin/wget" \
 		ARCH="$ARCH" \
@@ -324,7 +324,12 @@ case11() {
 	kill "$(cat "$SB/state/watchdog.pid")" 2>/dev/null
 	sleep 1
 	assert_file "määräaika säilyi levyllä" "$SB/state/deadline"
-	# määräaika hyvin lähelle nykyhetkeä, jotta rollback ehtii testin aikana
+	# Boottauksessa uptime nollautuu, jolloin edellisellä käynnistyskerralla
+	# kirjattu monotoninen määräaika jää kauas tulevaisuuteen ja hylätään.
+	# Ilman tätä simulaatio ei vastaisi oikeaa boottausta.
+	echo "$(( $(awk '{print int($1)}' /proc/uptime) + 100000 ))" \
+		> "$SB/state/deadline.uptime"
+	# seinäkellon määräaika lähelle nykyhetkeä, jotta rollback ehtii testiin
 	echo "$(( $(date +%s) + 5 ))" > "$SB/state/deadline"
 	TS_TIMEOUT=120 ts boot-check >/dev/null 2>&1
 	assert_file "vahti viritetty uudelleen" "$SB/state/watchdog.pid"
@@ -573,8 +578,49 @@ EOF
 	assert_file "daemon jätettiin rauhaan" "$SB/daemon.pid"
 }
 
+case21() {
+	CASE="21 kellon hyppy ei katkaise vahvistusikkunaa"; setup; say "$CASE"
+	TS_TIMEOUT=60 ts run >/dev/null 2>&1
+	assert "uusi versio asennettu" "$(installed_version)" "$NEW"
+	assert_file "monotoninen määräaika kirjattu" "$SB/state/deadline.uptime"
+
+	# simuloi tunnin ntp-hyppyä eteenpäin: seinäkellon määräaika on jo mennyt
+	echo "$(( $(date +%s) - 3600 ))" > "$SB/state/deadline"
+	sleep 12
+	assert "vahti ei palauttanut" "$(installed_version)" "$NEW"
+	assert_file "vahvistusikkuna yhä auki" "$SB/state/deadline"
+
+	# ilman monotonista laskuria palataan seinäkelloon, jolloin rollback tulee
+	rm -f "$SB/state/deadline.uptime"
+	i=0
+	while [ "$i" -lt 30 ] && [ -f "$SB/state/deadline" ]; do sleep 1; i=$((i + 1)); done
+	sleep 2
+	assert "seinäkello toimii varapolkuna" "$(installed_version)" "$OLD"
+}
+
+case22() {
+	CASE="22 työhakemisto puuttuu"; setup; say "$CASE"
+	# asetuksissa osoitettu hakemisto, jota ei ole vielä luotu
+	rm -rf "$SB/tmp"
+	out="$(ts check 2>&1)"
+	case "$out" in *"$NEW"*) ok "check luo työhakemiston itse" ;;
+		*) bad "check ei toipunut puuttuvasta hakemistosta: $out" ;; esac
+	assert_file "hakemisto luotiin" "$SB/tmp"
+
+	# hakemisto, jota ei voi luoda: virheen pitää kertoa syy
+	out="$(TS_TMP_DIR=/proc/ts-update-ei-onnistu ts check 2>&1)"
+	case "$out" in *"työhakemistoon ei voi kirjoittaa"*) ok "kertoo syyn" ;;
+		*) bad "väärä viesti: $out" ;; esac
+	case "$out" in *"EI SAATU"*) ok "check ei väitä tietävänsä versiota" ;;
+		*) bad "check väitti jotain muuta: $out" ;; esac
+
+	out="$(TS_TMP_DIR=/proc/ts-update-ei-onnistu ts run 2>&1)"; rc=$?
+	assert "run keskeytyy" "$rc" 1
+	assert "binääriä ei vaihdettu" "$(installed_version)" "$OLD"
+}
+
 run_suite() {
-	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
 		want "$n" || continue
 		"case$n"
 	done
