@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Calendar Versioning](https://calver.org/) (`vYY.MM.DD.N`).
 
+## [Unreleased]
+
+### Fixed
+- Waiting for the lock now works on BusyBox `flock`, which has no `-w` (timeout) option. The old code called `flock -w`, which failed with a usage error on OpenWrt instead of waiting, so rollback and watchdog paths gave up immediately and reported the lock as busy. A poll loop on `flock -n` replaces it.
+
 ## [v26.08.12.7] - 2026-08-12
 
 ### Added
