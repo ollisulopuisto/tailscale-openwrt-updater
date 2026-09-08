@@ -189,12 +189,20 @@ lock_acquire() {
 		# is checked first with normal redirection.
 		: > "$LOCK_FILE" 2>/dev/null || return 1
 		exec 9>"$LOCK_FILE"
-		if [ "$_wait" -gt 0 ]; then
-			flock -w "$_wait" 9 && return 0
-		else
+		# BusyBox flock supports only -n/-x/-s, not GNU's -w (timeout).
+		# With -w it aborts with a usage error instead of waiting, and
+		# that was previously read as "lock busy" / rollback in progress.
+		# A poll loop on -n works with both flock implementations.
+		if [ "$_wait" -le 0 ]; then
 			flock -n 9 && return 0
+			return 1
 		fi
-		return 1
+		_end=$(( $(date +%s) + _wait ))
+		while :; do
+			flock -n 9 2>/dev/null && return 0
+			[ "$(date +%s)" -lt "$_end" ] || return 1
+			sleep 1
+		done
 	fi
 
 	_d="$LOCK_FILE.d"
