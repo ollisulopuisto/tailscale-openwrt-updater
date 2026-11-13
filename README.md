@@ -34,7 +34,7 @@ Avoid using `wget -q` in pipe mode: if the download fails, `sh` receives empty i
 Pin version and require SHA-256 checksum:
 
 ```sh
-sh /tmp/netinstall.sh --ref v1.0 --sha256 <checksum>
+sh /tmp/netinstall.sh --ref v1.0.0 --sha256 <checksum>
 ```
 
 Uninstall (configuration, state, and backups remain intact):

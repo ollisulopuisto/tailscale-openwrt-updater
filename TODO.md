@@ -8,14 +8,24 @@ Background and usage instructions: see [README.md](README.md).
 
 ## Current Status
 
-Active on single router (aarch64, OpenWrt 25.12.5). Commands implemented:
-`check`, `run [--dry-run]`, `confirm`, `rollback`, `status`, `boot-check`,
-internal `_watchdog`. Backup saved at `/root/ts-backup/*.gz`, pending state
-at `/root/ts-update/`, watchdog detached from session using `setsid`.
+Version 1.0.0. In use on two routers:
 
-Repository includes `install.sh` (multi-host deployment), `ts-update-bootcheck.init`
-(boot check init script), `ts-update.default` (config template), and `tests/run-tests.sh`
-(sandboxed test matrix, no real hardware required).
+- **aarch64**, OpenWrt 25.12.5: normal install, updates with the watchdog.
+- **ramips/mt7621** (`mipsel_24kc` -> `mipsle`), 16 MB flash: binaries on a USB disk
+  with symlinks in `/usr/sbin`, because the 70 MB upstream binary does not fit in
+  flash. `SBIN_DIR`, `BACKUP_DIR` and `TMP_DIR` point at the disk, `STATE_DIR` stays
+  in flash.
+
+Commands: `check`, `run [--dry-run]`, `confirm`, `rollback`, `status`,
+`boot-check`, internal `_watchdog`. Backup saved at `$BACKUP_DIR/*.gz`, pending
+state at `$STATE_DIR`, watchdog detached from the session with `setsid`, and the
+deadline measured from the monotonic `/proc/uptime` counter.
+
+The repository also includes `netinstall.sh` (install on the device straight from
+GitHub), `install.sh` (multi-host install from a workstation),
+`ts-update-bootcheck.init`, `ts-update.default` and `tests/run-tests.sh` (22 test
+cases in a sandbox, no real hardware required). CI runs shellcheck and the test
+matrix under both dash and busybox ash.
 
 ## Completed Tasks
 
