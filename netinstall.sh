@@ -1,43 +1,42 @@
 #!/bin/sh
-# netinstall.sh — asenna ts-update OpenWrt-laitteelle suoraan GitHubista.
+# netinstall.sh — install ts-update on OpenWrt directly from GitHub.
 #
-# Ajetaan laitteella itsellään (vrt. install.sh, joka työntää tiedostot
-# työasemalta ssh:n yli). Hakee ts-updaten, boottitarkistuksen ja
-# asetusmallin, tarkistaa että ne ovat ehjiä, asentaa ja ottaa käyttöön.
+# Runs on the router itself (unlike install.sh which pushes files from a
+# workstation over SSH). Downloads ts-update, boot check init script, and
+# default config template, verifies integrity, installs, and enables them.
 #
-# Suositeltu tapa — lataa, katso mitä ajat, aja sitten:
+# Recommended usage — download, inspect script, then execute:
 #   URL=https://raw.githubusercontent.com/ollisulopuisto/tailscale-openwrt-updater/main/netinstall.sh
-#   wget -O /tmp/netinstall.sh "$URL"   # tai: curl -fsSL -o /tmp/netinstall.sh "$URL"
+#   wget -O /tmp/netinstall.sh "$URL"   # or: curl -fsSL -o /tmp/netinstall.sh "$URL"
 #   sh /tmp/netinstall.sh
 #
-# Yhdellä rivillä, jos luotat lähteeseen (kumpi tahansa käy):
+# One-liner usage (either fetcher works):
 #   wget -O- "$URL" | sh
 #   curl -fsSL "$URL" | sh
 #
-# OpenWrt:n oma wget on uclient-fetch; sekin kelpaa. Skripti tunnistaa
-# itse, kumpi laitteelta löytyy (wget, uclient-fetch tai curl).
+# OpenWrt's built-in wget is uclient-fetch; that works too. The script
+# automatically detects available HTTP fetchers (wget, uclient-fetch, or curl).
 #
-# Valinnat:
-#   -r, --ref REF        haara, tagi tai commit (oletus main)
-#   -R, --repo OMISTAJA/REPO
-#   -c, --sha256 SUMMA   vaadi tämä sha256 ts-updatelle
-#   -p, --prefix DIR     asenna hakemiston DIR alle (testaus)
-#   -w, --wget KOMENTO   latauskomento (wget, uclient-fetch, curl)
-#   -B, --no-boot-hook   älä asenna boottitarkistusta
-#   -f, --force          asenna vaikka päivitys odottaisi vahvistusta
-#   -u, --uninstall      poista asennus (tila ja varmuuskopiot jäävät)
-#   -n, --dry-run        näytä mitä tehtäisiin
-#   -h, --help           tämä ohje
+# Options:
+#   -r, --ref REF        branch, tag, or commit (default: main)
+#   -R, --repo OWNER/REPO target repository
+#   -c, --sha256 SUM     require this sha256 checksum for ts-update
+#   -p, --prefix DIR     install under prefix directory DIR (testing)
+#   -w, --wget CMD       download command (wget, uclient-fetch, curl)
+#   -B, --no-boot-hook   do not install boot check init script
+#   -f, --force          install even if update confirmation is pending
+#   -u, --uninstall      remove installation (state and backups are preserved)
+#   -n, --dry-run        show what would be done without making changes
+#   -h, --help           show this help text
 #
-# Ympäristö: WGET=uclient-fetch valitsee latauskomennon.
+# Environment: WGET=uclient-fetch overrides download command selection.
 
 set -u
 
-# Koko runko on main()-funktiossa ja se kutsutaan vasta viimeisellä
-# rivillä. Kun skripti ajetaan putkesta (wget ... | sh), sh lukee ja
-# suorittaa sitä palanen kerrallaan — kesken katkennut lataus ajaisi
-# puolikkaan skriptin. Näin puolikas ei tee mitään: main on joko
-# kokonaan luettu tai sitä ei kutsuta lainkaan.
+# Entire body resides in main() and is invoked on the last line.
+# When run from a pipe (wget ... | sh), sh reads and executes line by line;
+# an interrupted download would otherwise execute a partial script.
+# With main(), a partial script does nothing: main is either completely read or not called.
 main() {
 
 	REPO="${REPO:-ollisulopuisto/tailscale-openwrt-updater}"
@@ -60,45 +59,44 @@ main() {
 
 	usage() {
 		cat <<-'EOF'
-	netinstall.sh — asenna ts-update OpenWrt-laitteelle suoraan GitHubista.
+	netinstall.sh — install ts-update on OpenWrt directly from GitHub.
 
-	Ajetaan laitteella itsellään (vrt. install.sh, joka työntää tiedostot
-	työasemalta ssh:n yli).
+	Runs on the router itself (unlike install.sh which pushes files over SSH).
 
 	  URL=https://raw.githubusercontent.com/ollisulopuisto/tailscale-openwrt-updater/main/netinstall.sh
-	  wget -O /tmp/netinstall.sh "$URL"    # tai: curl -fsSL -o /tmp/netinstall.sh "$URL"
+	  wget -O /tmp/netinstall.sh "$URL"    # or: curl -fsSL -o /tmp/netinstall.sh "$URL"
 	  sh /tmp/netinstall.sh
 
-	Yhdellä rivillä, jos luotat lähteeseen:  wget -O- "$URL" | sh
+	One-liner usage:                         wget -O- "$URL" | sh
 	                                         curl -fsSL "$URL" | sh
 
-	Valinnat:
-	  -r, --ref REF        haara, tagi tai commit (oletus main)
-	  -R, --repo OMISTAJA/REPO
-	  -c, --sha256 SUMMA   vaadi tämä sha256 ts-updatelle
-	  -p, --prefix DIR     asenna hakemiston DIR alle (testaus)
-	  -w, --wget KOMENTO   latauskomento (wget, uclient-fetch, curl)
-	  -B, --no-boot-hook   älä asenna boottitarkistusta
-	  -f, --force          asenna vaikka päivitys odottaisi vahvistusta
-	  -u, --uninstall      poista asennus (tila ja varmuuskopiot jäävät)
-	  -n, --dry-run        näytä mitä tehtäisiin
-	  -h, --help           tämä ohje
+	Options:
+	  -r, --ref REF        branch, tag, or commit (default: main)
+	  -R, --repo OWNER/REPO target repository
+	  -c, --sha256 SUM     require this sha256 checksum for ts-update
+	  -p, --prefix DIR     install under prefix directory DIR (testing)
+	  -w, --wget CMD       download command (wget, uclient-fetch, curl)
+	  -B, --no-boot-hook   do not install boot check init script
+	  -f, --force          install even if update confirmation is pending
+	  -u, --uninstall      remove installation (state and backups are preserved)
+	  -n, --dry-run        show what would be done without making changes
+	  -h, --help           show this help text
 	EOF
 	}
 
 	while [ $# -gt 0 ]; do
 		case "$1" in
-			-r|--ref)      [ $# -ge 2 ] || die "$1 vaatii arvon"; REF="$2"; shift 2 ;;
-			-R|--repo)     [ $# -ge 2 ] || die "$1 vaatii arvon"; REPO="$2"; shift 2 ;;
-			-c|--sha256)   [ $# -ge 2 ] || die "$1 vaatii arvon"; WANT_SHA="$2"; shift 2 ;;
-			-p|--prefix)   [ $# -ge 2 ] || die "$1 vaatii arvon"; PREFIX="$2"; shift 2 ;;
-			-w|--wget)     [ $# -ge 2 ] || die "$1 vaatii arvon"; WGET="$2"; shift 2 ;;
+			-r|--ref)      [ $# -ge 2 ] || die "$1 requires a value"; REF="$2"; shift 2 ;;
+			-R|--repo)     [ $# -ge 2 ] || die "$1 requires a value"; REPO="$2"; shift 2 ;;
+			-c|--sha256)   [ $# -ge 2 ] || die "$1 requires a value"; WANT_SHA="$2"; shift 2 ;;
+			-p|--prefix)   [ $# -ge 2 ] || die "$1 requires a value"; PREFIX="$2"; shift 2 ;;
+			-w|--wget)     [ $# -ge 2 ] || die "$1 requires a value"; WGET="$2"; shift 2 ;;
 			-B|--no-boot-hook) WITH_BOOTHOOK=0; shift ;;
 			-f|--force)    FORCE=1; shift ;;
 			-u|--uninstall) UNINSTALL=1; shift ;;
 			-n|--dry-run)  DRY=1; shift ;;
 			-h|--help)     usage; exit 0 ;;
-			*)             die "tuntematon valitsin: $1 (-h = ohje)" ;;
+			*)             die "unknown option: $1 (-h for help)" ;;
 		esac
 	done
 
@@ -112,88 +110,87 @@ main() {
 		"$@"
 	}
 
-	# --- poisto -------------------------------------------------------------
+	# --- uninstall ----------------------------------------------------------
 
 	if [ "$UNINSTALL" = 1 ]; then
 		if [ -x "$PREFIX$INITD/ts-update-bootcheck" ] && [ -z "$PREFIX" ]; then
 			run "$INITD/ts-update-bootcheck" disable 2>/dev/null || true
 		fi
 		run rm -f "$PREFIX$INITD/ts-update-bootcheck" "$PREFIX$SBIN/ts-update"
-		say "ts-update poistettu."
-		say "Jätettiin ennalleen: $PREFIX$DEFAULTS/ts-update, $PREFIX$STATE_DIR, $PREFIX/root/ts-backup"
+		say "ts-update uninstalled."
+		say "Left untouched: $PREFIX$DEFAULTS/ts-update, $PREFIX$STATE_DIR, $PREFIX/root/ts-backup"
 		exit 0
 	fi
 
-	# --- latauskomento ------------------------------------------------------
+	# --- download command ---------------------------------------------------
 
 	if [ -z "$WGET" ]; then
 		for _c in wget uclient-fetch curl; do
 			if command -v "$_c" >/dev/null 2>&1; then WGET="$_c"; break; fi
 		done
 	fi
-	[ -n "$WGET" ] || die "ei löytynyt wgetiä, uclient-fetchiä eikä curlia"
+	[ -n "$WGET" ] || die "no wget, uclient-fetch, or curl found"
 
-	# curl tarvitsee eri valitsimet kuin wget/uclient-fetch
-	fetch() {  # fetch <url> <kohde>
+	# curl requires different flags than wget/uclient-fetch
+	fetch() {  # fetch <url> <target>
 		case "$WGET" in
 			*curl)  "$WGET" -fsSL -o "$2" "$1" ;;
 			*)      "$WGET" -q -O "$2" "$1" ;;
 		esac
 	}
 
-	# --- odottava päivitys --------------------------------------------------
+	# --- pending update check -----------------------------------------------
 
-	# Uuden skriptin asentaminen kesken vahvistusikkunan sotkisi käynnissä
-	# olevan vahdin, joten se estetään ilman --forcea.
+	# Installing new script during confirmation window interferes with active watchdog,
+	# so it is blocked unless --force is passed.
 	if [ -r "$PREFIX$DEFAULTS/ts-update" ]; then
-		# shellcheck disable=SC1090  # laitteen oma asetustiedosto
+		# shellcheck disable=SC1090  # device config file
 		STATE_DIR="$(. "$PREFIX$DEFAULTS/ts-update" 2>/dev/null; echo "${STATE_DIR:-/root/ts-update}")"
 	fi
 	if [ "$FORCE" = 0 ] && { [ -f "$PREFIX$STATE_DIR/deadline" ] || [ -f "$PREFIX$STATE_DIR/pending" ]; }; then
-		echo "netinstall: päivitys odottaa yhä vahvistusta." >&2
-		echo "  Aja ensin: ts-update confirm  (tai ts-update rollback)" >&2
-		echo "  Ohita tämä tarvittaessa: --force" >&2
+		echo "netinstall: an update is still pending confirmation." >&2
+		echo "  Run first: ts-update confirm  (or ts-update rollback)" >&2
+		echo "  Override with --force if needed" >&2
 		exit 1
 	fi
 
-	# --- lataus -------------------------------------------------------------
+	# --- download -----------------------------------------------------------
 
 	TMP="${TMPDIR:-/tmp}/ts-update-netinstall.$$"
 	cleanup() { rm -rf "$TMP"; }
 	trap cleanup EXIT
 	trap 'cleanup; exit 130' INT
 	trap 'cleanup; exit 143' TERM
-	mkdir -p "$TMP" || die "väliaikaishakemistoa ei voi luoda"
+	mkdir -p "$TMP" || die "cannot create temporary directory"
 
-	say "lähde: $BASE_URL"
+	say "source: $BASE_URL"
 
-	get() {  # get <tiedosto>
+	get() {  # get <filename>
 		if ! fetch "$BASE_URL/$1" "$TMP/$1"; then
-			echo "netinstall: lataus epäonnistui: $BASE_URL/$1" >&2
-			echo "  Jos HTTPS ei toimi, laitteesta puuttuu todennäköisesti" >&2
-			echo "  ca-bundle tai libustream-mbedtls (apk add ca-bundle)." >&2
+			echo "netinstall: download failed: $BASE_URL/$1" >&2
+			echo "  If HTTPS fails, the device is likely missing" >&2
+			echo "  ca-bundle or libustream-mbedtls (apk add ca-bundle)." >&2
 			exit 1
 		fi
-		[ -s "$TMP/$1" ] || die "tyhjä tiedosto: $1"
+		[ -s "$TMP/$1" ] || die "empty file: $1"
 	}
 
 	get ts-update
 	get ts-update.default
 	[ "$WITH_BOOTHOOK" = 1 ] && get ts-update-bootcheck.init
 
-	# Katkennut lataus huomataan ennen kuin mitään on asennettu: skriptien
-	# viimeinen rivi on loppumerkki, ja ts-updaten pitää myös jäsentyä.
-	# Pelkkä sh -n ei riitä — tiedoston alkuosa on kommenttia, joka menee
-	# syntaksitarkistuksesta läpi sellaisenaan.
-	complete_file() {  # complete_file <tiedosto>
+	# Interrupted download is detected before anything is installed:
+	# last line of scripts must be end marker, and ts-update must parse cleanly.
+	# Simple sh -n is insufficient since file header is comments that parse cleanly.
+	complete_file() {  # complete_file <filename>
 		tail -n 5 "$1" | grep -q '^# ts-update-eof$'
 	}
 
-	complete_file "$TMP/ts-update" || die "ladattu ts-update on katkennut"
-	sh -n "$TMP/ts-update" || die "ladattu ts-update ei ole ehjä"
+	complete_file "$TMP/ts-update" || die "downloaded ts-update is truncated"
+	sh -n "$TMP/ts-update" || die "downloaded ts-update is corrupted"
 	if [ "$WITH_BOOTHOOK" = 1 ]; then
 		complete_file "$TMP/ts-update-bootcheck.init" \
-			|| die "ladattu ts-update-bootcheck.init on katkennut"
+			|| die "downloaded ts-update-bootcheck.init is truncated"
 	fi
 
 	SUM=""
@@ -201,27 +198,26 @@ main() {
 		SUM="$(sha256sum "$TMP/ts-update" | awk '{print $1}')"
 	fi
 	if [ -n "$WANT_SHA" ]; then
-		[ -n "$SUM" ] || die "sha256sum puuttuu, tarkistussummaa ei voi varmistaa"
-		[ "$SUM" = "$WANT_SHA" ] || die "tarkistussumma ei täsmää: $SUM"
-		say "tarkistussumma ok"
+		[ -n "$SUM" ] || die "sha256sum is missing, cannot verify checksum"
+		[ "$SUM" = "$WANT_SHA" ] || die "checksum mismatch: $SUM"
+		say "checksum ok"
 	fi
 
-	# --- asennus ------------------------------------------------------------
+	# --- installation -------------------------------------------------------
 
-	run mkdir -p "$PREFIX$SBIN" "$PREFIX$DEFAULTS" || die "hakemistoja ei voi luoda"
-	run cp "$TMP/ts-update" "$PREFIX$SBIN/ts-update.new" || die "kopiointi epäonnistui"
+	run mkdir -p "$PREFIX$SBIN" "$PREFIX$DEFAULTS" || die "cannot create directories"
+	run cp "$TMP/ts-update" "$PREFIX$SBIN/ts-update.new" || die "copy failed"
 	run chmod 755 "$PREFIX$SBIN/ts-update.new"
-	run mv "$PREFIX$SBIN/ts-update.new" "$PREFIX$SBIN/ts-update" || die "asennus epäonnistui"
-	say "asennettu: $PREFIX$SBIN/ts-update"
+	run mv "$PREFIX$SBIN/ts-update.new" "$PREFIX$SBIN/ts-update" || die "installation failed"
+	say "installed: $PREFIX$SBIN/ts-update"
 	[ -n "$SUM" ] && say "sha256:    $SUM"
 
-	# Asetustiedostoa ei ylikirjoiteta: laitekohtaiset PEER/TIMEOUT-arvot
-	# säilyvät päivityksen yli.
+	# Config file is preserved: device-specific PEER/TIMEOUT values remain intact across updates.
 	if [ -e "$PREFIX$DEFAULTS/ts-update" ]; then
-		say "asetukset:  $PREFIX$DEFAULTS/ts-update (säilytettiin ennallaan)"
+		say "settings:  $PREFIX$DEFAULTS/ts-update (kept untouched)"
 	else
 		run cp "$TMP/ts-update.default" "$PREFIX$DEFAULTS/ts-update"
-		say "asetukset:  $PREFIX$DEFAULTS/ts-update (uusi, malliarvot)"
+		say "settings:  $PREFIX$DEFAULTS/ts-update (new default configuration)"
 	fi
 
 	if [ "$WITH_BOOTHOOK" = 1 ]; then
@@ -230,13 +226,13 @@ main() {
 		run chmod 755 "$PREFIX$INITD/ts-update-bootcheck"
 		if [ -z "$PREFIX" ] && [ "$DRY" = 0 ]; then
 			if "$INITD/ts-update-bootcheck" enable 2>/dev/null; then
-				say "boottitarkistus: käytössä"
+				say "boot check: enabled"
 			else
-				say "boottitarkistus: asennettu, mutta enable epäonnistui —"
-				say "  ota käyttöön käsin: $INITD/ts-update-bootcheck enable"
+				say "boot check: installed, but enable failed —"
+				say "  enable manually: $INITD/ts-update-bootcheck enable"
 			fi
 		else
-			say "boottitarkistus: $PREFIX$INITD/ts-update-bootcheck"
+			say "boot check: $PREFIX$INITD/ts-update-bootcheck"
 		fi
 	fi
 
@@ -244,7 +240,7 @@ main() {
 		say ""
 		"$SBIN/ts-update" check || true
 		say ""
-		say "Päivitys: ts-update run   (ja sen jälkeen ts-update confirm)"
+		say "Update: ts-update run   (followed by ts-update confirm)"
 	fi
 
 }
